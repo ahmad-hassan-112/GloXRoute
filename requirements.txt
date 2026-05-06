@@ -4,3 +4,6 @@ networkx
 matplotlib
 tqdm
 
+scikit-learn
+joblib
+torch
