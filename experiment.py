@@ -102,61 +102,61 @@ class ExperimentRunner:
         self.logger.info("LearnedGlobalCoordinator training complete")
 
         # NeuralHybridXAI
-        self.logger.info("Using prebuilt neural datasets")
-        self.logger.info("NN datasets loaded: train=%d, val=%d", len(self.nn_train_df), len(self.nn_val_df))
-        self.logger.info("Training NeuralHybridXAI model...")
+        # self.logger.info("Using prebuilt neural datasets")
+        # self.logger.info("NN datasets loaded: train=%d, val=%d", len(self.nn_train_df), len(self.nn_val_df))
+        # self.logger.info("Training NeuralHybridXAI model...")
 
-        self.epoch_results = self.nn_learner.train(
-            self.nn_train_df,
-            val_df=self.nn_val_df,
-            output_dir=self.run_output_dir,
-            logger=get_logger("train.nn", self.run_log_path)
-        )
+        # self.epoch_results = self.nn_learner.train(
+        #     self.nn_train_df,
+        #     val_df=self.nn_val_df,
+        #     output_dir=self.run_output_dir,
+        #     logger=get_logger("train.nn", self.run_log_path)
+        # )
 
-        self.logger.info("Epoch results saved: %s/nn_epoch_results.csv", self.run_output_dir)
-        self.logger.info("Model saved: %s/learned_hybrid_xai_nn.pt", self.run_output_dir)
-        self.logger.info("NeuralHybridXAI training complete")
+        # self.logger.info("Epoch results saved: %s/nn_epoch_results.csv", self.run_output_dir)
+        # self.logger.info("Model saved: %s/learned_hybrid_xai_nn.pt", self.run_output_dir)
+        # self.logger.info("NeuralHybridXAI training complete")
 
         # LearnedHybridXAIRouter
-        self.logger.info("Training HybridParameterLearner for LearnedHybridXAIRouter...")
-        results = self.hybrid_learner.train(
-            G=self.G,
-            agents=self.agents,
-            coordinator=self.learned_coordinator,
-            train_tasks=self.train_tasks,
-            val_tasks=self.val_tasks,
-            save_path=os.path.join(self.model_dir, "learned_hybrid_xai_hybrid.pkl")
-        )
-        self.logger.info("HybridParameterLearner training complete")
-        self.logger.info("Validation results: %s", results)
-        print("Validation results:", results)
-        self.logger.info("HybridParameterLearner training complete")
+        # self.logger.info("Training HybridParameterLearner for LearnedHybridXAIRouter...")
+        # results = self.hybrid_learner.train(
+        #     G=self.G,
+        #     agents=self.agents,
+        #     coordinator=self.learned_coordinator,
+        #     train_tasks=self.train_tasks,
+        #     val_tasks=self.val_tasks,
+        #     save_path=os.path.join(self.model_dir, "learned_hybrid_xai_hybrid.pkl")
+        # )
+        # self.logger.info("HybridParameterLearner training complete")
+        # self.logger.info("Validation results: %s", results)
+        # print("Validation results:", results)
+        # self.logger.info("HybridParameterLearner training complete")
 
         # GNNHybridXAI
-        self.logger.info("Using prebuilt GNN datasets")
-        self.logger.info("GNN datasets loaded: train=%d, val=%d", len(self.gnn_train_df), len(self.gnn_val_df))
-        self.logger.info("Training GNNHybridXAI model...")
+        # self.logger.info("Using prebuilt GNN datasets")
+        # self.logger.info("GNN datasets loaded: train=%d, val=%d", len(self.gnn_train_df), len(self.gnn_val_df))
+        # self.logger.info("Training GNNHybridXAI model...")
 
-        self.gnn_epoch_results = self.gnn_learner.train(
-            self.gnn_train_df,
-            val_df=self.gnn_val_df,
-            output_dir=self.run_output_dir,
-            logger=get_logger("train.gnn", self.run_log_path)
-        )
+        # self.gnn_epoch_results = self.gnn_learner.train(
+        #     self.gnn_train_df,
+        #     val_df=self.gnn_val_df,
+        #     output_dir=self.run_output_dir,
+        #     logger=get_logger("train.gnn", self.run_log_path)
+        # )
 
-        self.logger.info("GNN epoch results saved: %s/gnn_epoch_results.csv", self.run_output_dir)
-        self.logger.info("Model saved: %s/learned_hybrid_xai_gnn.pt", self.run_output_dir)
-        self.logger.info("GNNHybridXAI training complete")
+        # self.logger.info("GNN epoch results saved: %s/gnn_epoch_results.csv", self.run_output_dir)
+        # self.logger.info("Model saved: %s/learned_hybrid_xai_gnn.pt", self.run_output_dir)
+        # self.logger.info("GNNHybridXAI training complete")
 
-        os.makedirs(self.model_dir, exist_ok=True)
-        shutil.copyfile(
-            os.path.join(self.run_output_dir, "learned_hybrid_xai_nn.pt"),
-            os.path.join(self.model_dir, "learned_hybrid_xai_nn.pt"),
-        )
-        shutil.copyfile(
-            os.path.join(self.run_output_dir, "learned_hybrid_xai_gnn.pt"),
-            os.path.join(self.model_dir, "learned_hybrid_xai_gnn.pt"),
-        )
+        # os.makedirs(self.model_dir, exist_ok=True)
+        # shutil.copyfile(
+        #     os.path.join(self.run_output_dir, "learned_hybrid_xai_nn.pt"),
+        #     os.path.join(self.model_dir, "learned_hybrid_xai_nn.pt"),
+        # )
+        # shutil.copyfile(
+        #     os.path.join(self.run_output_dir, "learned_hybrid_xai_gnn.pt"),
+        #     os.path.join(self.model_dir, "learned_hybrid_xai_gnn.pt"),
+        # )
         self.learned_coordinator.save(
             os.path.join(self.model_dir, "learned_global_coordinator.npz")
         )
@@ -181,9 +181,9 @@ class ExperimentRunner:
     def init_routers(self):
         self.routers = [
             ShortestPathRouter(),
-            # CentralizedRouter(),
-            # DecentralizedGreedyRouter(),
-            BiRouterStyleRouter(),
+            CentralizedRouter(),
+            DecentralizedGreedyRouter(),
+            # BiRouterStyleRouter(),
             # HybridXAIRouter(self.coordinator, router_name="HybridXAI_HeuristicCoord"),
             HybridXAIRouter(self.learned_coordinator, router_name="HybridXAI_LearnedCoord"),
             NeuralHybridXAIRouter(self.learned_coordinator, self.nn_learner),

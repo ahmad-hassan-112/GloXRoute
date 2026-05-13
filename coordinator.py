@@ -116,15 +116,17 @@ class GlobalCoordinator:
 
 class LearnedGlobalCoordinator(GlobalCoordinator):
     """
-    Trainable coordinator:
+    Enhanced Trainable Coordinator:
     - keeps heuristic next-hop planner from GlobalCoordinator
     - learns a lightweight regression model for guidance scores
+    - improved features and dynamic blending
     """
 
     def __init__(self, G: nx.Graph, agents: Dict[int, Agent], blend_alpha: float = 0.7):
         self.blend_alpha = blend_alpha
         self.capability_weights = {}
         self.is_trained = False
+        self.dynamic_alpha = blend_alpha
         super().__init__(G, agents)
 
     def _build_feature_vector(self, node: int, capability: str):
@@ -133,15 +135,14 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
         degree_norm = self.G.degree[node] / max(1, len(self.G.nodes()))
 
         capable_neighbors = sum(
-            1 for n in neighbors
-            if capability in self.agents[n].capabilities
+            1 for n in neighbors if capability in self.agents[n].capabilities
         )
         capable_neighbor_ratio = capable_neighbors / max(1, len(neighbors))
-        neighbor_load = (
-            sum(self.agents[n].load for n in neighbors) / max(1, len(neighbors))
-        )
+        neighbor_load = sum(self.agents[n].load for n in neighbors) / max(1, len(neighbors))
+        avg_neighbor_reliability = sum(self.agents[n].reliability for n in neighbors) / max(1, len(neighbors))
         has_capability = 1.0 if capability in agent.capabilities else 0.0
 
+        # Expanded feature vector
         return np.array(
             [
                 1.0,  # bias
@@ -152,12 +153,18 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
                 has_capability,
                 capable_neighbor_ratio,
                 neighbor_load,
+                avg_neighbor_reliability,  # new
+                len(neighbors),           # new: local connectivity
             ],
             dtype=np.float64,
         )
 
-    def train_guidance_model(self, train_tasks):
-        # Build target guidance from current heuristic coordinator behavior.
+    def train_guidance_model(self, train_tasks, feedback_tasks=None):
+        """
+        Train linear regression for guidance scores.
+        Optional feedback_tasks can be used to slightly adjust weights
+        based on real successes/failures.
+        """
         super().compute_guidance()
 
         capability_frequency = {cap: 1.0 for cap in CAPABILITIES}
@@ -178,10 +185,21 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
             y = np.array(y_rows, dtype=np.float64)
             w = np.array(sample_weights, dtype=np.float64)
 
+            # Optional feedback: adjust targets slightly based on task success
+            if feedback_tasks:
+                for task in feedback_tasks:
+                    if task.required_capability != capability:
+                        continue
+                    node = task.assigned_agent
+                    if node in self.G.nodes():
+                        success = 1.0 if task.success else 0.0
+                        y[node] = 0.7 * y[node] + 0.3 * success  # blend heuristic with outcome
+
             sqrt_w = np.sqrt(w).reshape(-1, 1)
             Xw = X * sqrt_w
             yw = y * sqrt_w.flatten()
 
+            # Linear regression weights (Moore-Penrose pseudo-inverse)
             weights = np.linalg.pinv(Xw.T @ Xw) @ (Xw.T @ yw)
             self.capability_weights[capability] = weights
 
@@ -189,11 +207,14 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
         self.compute_guidance()
 
     def compute_guidance(self):
-        # Keep next-hop from heuristic global view.
         super().compute_guidance()
 
         if not self.is_trained:
             return
+
+        # Dynamic blending based on network congestion or task criticality
+        avg_load = np.mean([agent.load for agent in self.agents.values()])
+        self.dynamic_alpha = min(max(0.3, self.blend_alpha + (avg_load - 0.5)), 0.9)
 
         for node in self.G.nodes():
             for capability in CAPABILITIES:
@@ -202,34 +223,41 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
                 predicted = float(features @ self.capability_weights[capability])
                 predicted = max(0.0, min(1.0, predicted))
                 self.guidance[node][capability] = (
-                    (1.0 - self.blend_alpha) * baseline
-                    + self.blend_alpha * predicted
+                    (1.0 - self.dynamic_alpha) * baseline
+                    + self.dynamic_alpha * predicted
                 )
 
     def explain_guidance(self, node: int, capability: str) -> str:
         base = super().explain_guidance(node, capability)
-        return f"{base}, guidance_source=learned_blend, blend_alpha={self.blend_alpha:.2f}"
-
+        return f"{base}, guidance_source=learned_blend, blend_alpha={self.dynamic_alpha:.2f}"
     def save(self, path: str):
+        """
+        Save coordinator checkpoint including learned weights and state.
+        """
         os.makedirs(os.path.dirname(path), exist_ok=True)
         payload = {
             "blend_alpha": np.array([self.blend_alpha], dtype=np.float64),
+            "dynamic_alpha": np.array([self.dynamic_alpha], dtype=np.float64),
             "is_trained": np.array([1 if self.is_trained else 0], dtype=np.int32),
             "update_round": np.array([self.update_round], dtype=np.int32),
         }
         for capability in CAPABILITIES:
             weights = self.capability_weights.get(capability)
             if weights is None:
-                weights = np.zeros(8, dtype=np.float64)
+                weights = np.zeros(10, dtype=np.float64)  # updated feature vector size
             payload[f"weights__{capability}"] = np.asarray(weights, dtype=np.float64)
         np.savez(path, **payload)
 
     def load(self, path: str):
+        """
+        Load coordinator checkpoint.
+        """
         if not os.path.exists(path):
             raise FileNotFoundError(f"Coordinator checkpoint not found: {path}")
 
         checkpoint = np.load(path, allow_pickle=False)
         self.blend_alpha = float(checkpoint["blend_alpha"][0])
+        self.dynamic_alpha = float(np.atleast_1d(checkpoint.get("dynamic_alpha", np.array([self.blend_alpha])))[0])
         self.is_trained = bool(int(checkpoint["is_trained"][0]))
         self.update_round = int(checkpoint["update_round"][0])
 
