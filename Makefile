@@ -5,6 +5,9 @@ PYTHON ?= python3
 datasets:
 	$(PYTHON) prepare_datasets.py
 
+benchmark:
+	$(PYTHON) benchmark_experiments.py
+
 learn:
 	$(PYTHON) main.py --mode train
 

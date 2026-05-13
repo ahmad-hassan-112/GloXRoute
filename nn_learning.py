@@ -525,7 +525,7 @@ class NeuralHybridLearner:
         torch.save(checkpoint, path)
 
     def load(self, path):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
 
         self.input_dim = checkpoint["input_dim"]
         self.feature_names = checkpoint["feature_names"]

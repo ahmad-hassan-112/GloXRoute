@@ -402,7 +402,7 @@ class GNNHybridLearner:
         torch.save(checkpoint, path)
 
     def load(self, path):
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
         self.scorer.load_state_dict(checkpoint["scorer_state_dict"])
         self.encoder.to(self.device)

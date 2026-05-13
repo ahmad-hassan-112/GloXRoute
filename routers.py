@@ -319,7 +319,7 @@ class HybridXAIRouter(BaseRouter):
                     + 1.0 * resource
                     - 2.0 * load
                     - 1.0 * congestion
-                    - 3.0 * latency_norm
+                    - 4.0 * latency_norm
                     - 4.0 * distance_to_required_norm
                     - 2.0 * dead_end_penalty
                 )

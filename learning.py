@@ -175,6 +175,32 @@ class HybridParameterLearner:
         self.model.fit(X, y)
         return self
 
+    # -------------------------------
+    # New method: train using tasks
+    # -------------------------------
+    def train(self, G, agents, coordinator, train_tasks, val_tasks=None, save_path=None):
+        """
+        Train the HybridParameterLearner using tasks.
+        Uses TrainingDataBuilder to generate features and labels.
+        """
+        builder = TrainingDataBuilder(G, agents, coordinator)
+        X_train, y_train = builder.build(train_tasks)
+
+        self.fit(X_train, y_train)
+
+        val_results = None
+        if val_tasks is not None:
+            X_val, y_val = builder.build(val_tasks)
+            y_pred_probs = np.array([self.predict_score(x) for x in X_val])
+            # Compute simple metrics
+            accuracy = ((y_pred_probs >= 0.5) == y_val).mean()
+            val_results = {"val_accuracy": accuracy, "num_val_samples": len(y_val)}
+
+        if save_path is not None:
+            self.save(save_path)
+
+        return val_results
+
     def predict_score(self, features):
         """
         Returns probability that this candidate is the best next-hop.

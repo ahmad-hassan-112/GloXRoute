@@ -114,7 +114,6 @@ class GlobalCoordinator:
             f"resource={agent.resource:.3f}"
         )
 
-
 class LearnedGlobalCoordinator(GlobalCoordinator):
     """
     Trainable coordinator:
