@@ -5,7 +5,8 @@ import os
 
 from config import CAPABILITIES
 from models import Agent
-from utils import capable_nodes
+
+from utils import capable_nodes, effective_edge_weight
 
 
 class GlobalCoordinator:
@@ -22,65 +23,66 @@ class GlobalCoordinator:
         self.agents = agents
         self.guidance = {}
         self.next_hop = {}
+        self.distance = {}
+        self.state_version = 0
         self.update_round = 0
         self.last_summary = {}
         self.compute_guidance()
 
     def compute_guidance(self):
-        for node in self.G.nodes():
-            self.guidance[node] = {}
-            self.next_hop[node] = {}
+        self.guidance = {node: {} for node in self.G.nodes()}
+        self.next_hop = {node: {} for node in self.G.nodes()}
+        self.distance = {node: {} for node in self.G.nodes()}
 
-            for capability in CAPABILITIES:
-                targets = capable_nodes(self.agents, capability)
+        weight = effective_edge_weight(self.agents)
 
-                best_cost = float("inf")
-                best_path = None
+        for capability in CAPABILITIES:
+            targets = [
+                node for node in capable_nodes(self.agents, capability)
+                if not getattr(self.agents[node], "failed", False)
+            ]
 
-                for target in targets:
-                    try:
-                        path = nx.shortest_path(
-                            self.G,
-                            node,
-                            target,
-                            weight="latency"
-                        )
-
-                        latency_cost = nx.shortest_path_length(
-                            self.G,
-                            node,
-                            target,
-                            weight="latency"
-                        )
-
-                        target_load = self.agents[target].load
-                        target_reliability = self.agents[target].reliability
-                        target_resource = self.agents[target].resource
-
-                        cost = (
-                            latency_cost
-                            + 3.0 * target_load
-                            - 2.0 * target_reliability
-                            - 1.0 * target_resource
-                        )
-
-                        if cost < best_cost:
-                            best_cost = cost
-                            best_path = path
-
-                    except nx.NetworkXNoPath:
-                        continue
-
-                if best_path is None:
+            if not targets:
+                for node in self.G.nodes():
+                    self.distance[node][capability] = float("inf")
                     self.guidance[node][capability] = 0.0
                     self.next_hop[node][capability] = None
-                else:
-                    self.guidance[node][capability] = 1.0 / (1.0 + best_cost)
+                continue
 
-                    if len(best_path) > 1:
-                        self.next_hop[node][capability] = best_path[1]
-                    else:
-                        self.next_hop[node][capability] = node
+            try:
+                distances, paths = nx.multi_source_dijkstra(
+                    self.G,
+                    sources=set(targets),
+                    weight=weight,
+                )
+            except Exception:
+                distances, paths = {}, {}
+
+            for node in self.G.nodes():
+                if getattr(self.agents[node], "failed", False):
+                    self.guidance[node][capability] = 0.0
+                    self.next_hop[node][capability] = None
+                    continue
+
+                if node not in distances:
+                    self.distance[node][capability] = float("inf")
+                    self.guidance[node][capability] = 0.0
+                    self.next_hop[node][capability] = None
+                    continue
+
+                cost = float(distances[node])
+                self.distance[node][capability] = cost
+                self.guidance[node][capability] = 1.0 / (1.0 + cost)
+
+                path_from_target_to_node = paths[node]
+                path_from_node_to_target = list(reversed(path_from_target_to_node))
+
+                if len(path_from_node_to_target) > 1:
+                    self.next_hop[node][capability] = path_from_node_to_target[1]
+                else:
+                    self.next_hop[node][capability] = node
+
+        self.state_version += 1
 
     def update_guidance(self):
         # Lightweight periodic refresh from summarized current agent state.
@@ -127,6 +129,19 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
         self.capability_weights = {}
         self.is_trained = False
         self.dynamic_alpha = blend_alpha
+        self.feature_names = [
+            "bias",
+            "reliability",
+            "resource",
+            "load",
+            "degree_norm",
+            "has_capability",
+            "capable_neighbor_ratio",
+            "neighbor_load",
+            "avg_neighbor_reliability",
+            "num_neighbors",
+        ]
+        self.feature_schema_version = "coord_v1"
         super().__init__(G, agents)
 
     def _build_feature_vector(self, node: int, capability: str):
@@ -240,6 +255,8 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
             "dynamic_alpha": np.array([self.dynamic_alpha], dtype=np.float64),
             "is_trained": np.array([1 if self.is_trained else 0], dtype=np.int32),
             "update_round": np.array([self.update_round], dtype=np.int32),
+            "feature_schema_version": np.array([self.feature_schema_version]),
+            "feature_names": np.array(self.feature_names),
         }
         for capability in CAPABILITIES:
             weights = self.capability_weights.get(capability)
@@ -260,6 +277,12 @@ class LearnedGlobalCoordinator(GlobalCoordinator):
         self.dynamic_alpha = float(np.atleast_1d(checkpoint.get("dynamic_alpha", np.array([self.blend_alpha])))[0])
         self.is_trained = bool(int(checkpoint["is_trained"][0]))
         self.update_round = int(checkpoint["update_round"][0])
+        saved_feature_names = list(checkpoint["feature_names"])
+        if saved_feature_names != self.feature_names:
+            raise ValueError(
+                "Coordinator feature schema mismatch. "
+                "Delete outputs/models/latest/learned_global_coordinator.npz and retrain."
+            )
 
         self.capability_weights = {}
         for capability in CAPABILITIES:

@@ -10,6 +10,7 @@ class Agent:
     load: float
     resource: float
     protocol: str
+    failed: bool = False
 
 
 @dataclass

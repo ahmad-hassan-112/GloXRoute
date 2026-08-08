@@ -39,3 +39,27 @@ NN_LEARNING_RATE = 0.001
 
 TRAIN_TASK_RATIO = 0.70
 VALIDATION_RATIO = 0.20
+
+
+# improving
+
+# PROTOCOL_MODE = "hard_block"
+# FAILURE_RATE = 0.10
+
+# Protocol / heterogeneity settings
+PROTOCOL_MODE = "soft_penalty"   # options: "none", "soft_penalty", "hard_block"
+PROTOCOL_PENALTY = 2.0
+
+# Congestion settings
+CONGESTION_LAMBDA = 1.0
+
+# Evaluation settings
+PATH_STRETCH_INF_CAP = 10.0
+
+# Scenario settings
+FAILURE_RATE = 0.0
+CONGESTION_SCENARIO = False
+
+# GloXRoute-LB settings
+LATENCY_BOUND_EPSILON = 0.02
+ROUTE_CACHE_MAXSIZE = 8192

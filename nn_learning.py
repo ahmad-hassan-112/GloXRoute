@@ -20,7 +20,7 @@ from config import (
 )
 
 from models import Task
-from utils import capable_nodes, path_latency
+from utils import capable_nodes, effective_edge_weight, path_latency
 
 
 class NNFeatureExtractor:
@@ -48,6 +48,9 @@ class NNFeatureExtractor:
         "current_load",
         "current_resource",
         "current_degree_norm",
+
+        "effective_latency_norm",
+        "protocol_penalty_norm",
     ]
 
     def extract(self, G, agents, coordinator, current_node, candidate_node, required_capability):
@@ -134,6 +137,27 @@ class NNFeatureExtractor:
         current_resource = agents[current_node].resource
         current_degree_norm = G.degree[current_node] / max(1, len(G.nodes()))
 
+
+        weight_fn = effective_edge_weight(agents)
+
+        edge_cost = weight_fn(
+            current_node,
+            candidate_node,
+            G[current_node][candidate_node]
+        )
+
+        if edge_cost is None:
+            edge_cost = 999.0
+
+        effective_latency_norm = edge_cost / 20.0
+
+        protocol_penalty_norm = (
+            0.0 if agents[current_node].protocol == agents[candidate_node].protocol else 1.0
+        )
+
+        # recommended_next = coordinator.next_hop[current_node][task.required_capability]
+        # recommended_next_match = 1.0 if candidate_node == recommended_next else 0.0
+
         return np.array([
             capability_match,
             global_hint,
@@ -151,6 +175,8 @@ class NNFeatureExtractor:
             current_load,
             current_resource,
             current_degree_norm,
+            effective_latency_norm,
+            protocol_penalty_norm,
         ], dtype=np.float32)
 
 
@@ -474,7 +500,8 @@ class NeuralHybridLearner:
         features = self.normalize_features(features)
         x = torch.tensor(features, dtype=torch.float32).view(1, -1).to(self.device)
 
-        with torch.no_grad():
+        self.model.eval()
+        with torch.inference_mode():
             logit = self.model(x)
             prob = torch.sigmoid(logit).item()
 

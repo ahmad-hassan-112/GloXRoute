@@ -8,6 +8,11 @@ from coordinator import GlobalCoordinator
 from learning import FeatureExtractor, HybridParameterLearner
 from nn_learning import NNFeatureExtractor, NeuralHybridLearner
 from gnn_learning import GNNHybridLearner
+from utils import source_can_solve, effective_edge_weight
+
+import math
+from collections import OrderedDict
+from config import LATENCY_BOUND_EPSILON, ROUTE_CACHE_MAXSIZE
 
 
 class BaseRouter:
@@ -16,11 +21,40 @@ class BaseRouter:
     def route(self, G: nx.Graph, agents: Dict[int, Agent], task: Task) -> RouteDecision:
         raise NotImplementedError
 
+class RouteCache:
+    def __init__(self, maxsize=8192):
+        self.maxsize = maxsize
+        self.data = OrderedDict()
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key):
+        if key not in self.data:
+            self.misses += 1
+            return None
+
+        self.data.move_to_end(key)
+        self.hits += 1
+        return list(self.data[key])
+
+    def put(self, key, path):
+        self.data[key] = list(path)
+        self.data.move_to_end(key)
+
+        while len(self.data) > self.maxsize:
+            self.data.popitem(last=False)
+
 
 class ShortestPathRouter(BaseRouter):
     name = "ShortestPath"
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         source = task.source
         required = task.required_capability
         candidates = capable_nodes(agents, required)
@@ -30,7 +64,8 @@ class ShortestPathRouter(BaseRouter):
 
         for target in candidates:
             try:
-                path = nx.shortest_path(G, source, target, weight="latency")
+                weight = effective_edge_weight(agents)
+                path = nx.shortest_path(G, source=task.source, target=target, weight=weight)
                 cost = path_latency(G, agents, path)
 
                 if cost < best_cost:
@@ -47,6 +82,12 @@ class CentralizedRouter(BaseRouter):
     name = "Centralized"
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         source = task.source
         required = task.required_capability
         candidates = capable_nodes(agents, required)
@@ -56,7 +97,8 @@ class CentralizedRouter(BaseRouter):
 
         for target in candidates:
             try:
-                path = nx.shortest_path(G, source, target, weight="latency")
+                weight = effective_edge_weight(agents)
+                path = nx.shortest_path(G, source=task.source, target=target, weight=weight)
 
                 latency = path_latency(G, agents, path)
                 load_penalty = agents[target].load * 5.0
@@ -79,6 +121,12 @@ class DecentralizedGreedyRouter(BaseRouter):
     name = "DecentralizedGreedy"
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         current = task.source
         required = task.required_capability
 
@@ -126,6 +174,12 @@ class BiRouterStyleRouter(BaseRouter):
     name = "BiRouterStyle"
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         current = task.source
         required = task.required_capability
 
@@ -188,6 +242,7 @@ class HybridXAIRouter(BaseRouter):
 
     def __init__(self, coordinator: GlobalCoordinator, router_name: str = "HybridXAI"):
         self.coordinator = coordinator
+        self.route_cache = RouteCache(maxsize=ROUTE_CACHE_MAXSIZE)
         self.name = router_name
         self.min_confidence_score = 0.5
 
@@ -246,6 +301,28 @@ class HybridXAIRouter(BaseRouter):
         return None, "fallback=none"
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
+
+        cache_key = (
+            int(task.source),
+            str(task.required_capability),
+            int(getattr(self.coordinator, "state_version", 0)),
+        )
+
+        cached_path = self.route_cache.get(cache_key)
+
+        if cached_path is not None:
+            return RouteDecision(
+                path=cached_path,
+                explanation="Cached GloXRoute-LB route reused from current coordinator state.",
+                extra_overhead=0.1,
+            )
+
         current = task.source
         required = task.required_capability
 
@@ -253,18 +330,7 @@ class HybridXAIRouter(BaseRouter):
         visited = {current}
         explanations = []
 
-        # If source already has required capability, explain it.
-        if required in agents[current].capabilities:
-            explanation = (
-                f"source_agent={current} already has required capability={required}; "
-                f"no routing needed"
-            )
-
-            return RouteDecision(
-                path=path,
-                explanation=explanation,
-                extra_overhead=0.1
-            )
+        weight_fn = effective_edge_weight(agents)
 
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
@@ -279,73 +345,75 @@ class HybridXAIRouter(BaseRouter):
             recommended_next = self.coordinator.next_hop.get(current, {}).get(required)
             coordinator_context = self.coordinator.explain_guidance(current, required)
 
-            best_neighbor = None
-            best_score = -float("inf")
-            best_explanation = ""
+            candidate_rows = []
 
             for n in candidates:
+                edge_data = G[current][n]
+
+                step_cost = weight_fn(current, n, edge_data)
+
+                if step_cost is None:
+                    continue
+
+                distance_table = getattr(self.coordinator, "distance", {})
+                remaining_cost = distance_table.get(n, {}).get(
+                    required,
+                    float("inf")
+                )
+
+                # Fallback if coordinator.distance is missing or incomplete.
+                if math.isinf(remaining_cost):
+                    distance_to_required_norm = self._distance_to_capable_norm(
+                        G,
+                        agents,
+                        n,
+                        required,
+                    )
+                    remaining_cost = distance_to_required_norm * 10.0
+                else:
+                    distance_to_required_norm = min(remaining_cost / 20.0, 1.0)
+
+                if math.isinf(remaining_cost):
+                    continue
+
+                total_cost = step_cost + remaining_cost
+
                 capability_match = 1.0 if required in agents[n].capabilities else 0.0
                 recommended_match = 1.0 if n == recommended_next else 0.0
-
                 global_hint = self.coordinator.guidance.get(n, {}).get(required, 0.0)
+
                 reliability = agents[n].reliability
                 resource = agents[n].resource
                 load = agents[n].load
                 latency = G[current][n]["latency"]
-
-                # Normalize latency because latency is between 1 and 10.
-                latency_norm = latency / 10.0
-
-                # Do not double-count load and congestion too strongly.
                 congestion = self.coordinator.congestion_penalty(n)
-                distance_to_required_norm = self._distance_to_capable_norm(
-                    G,
-                    agents,
-                    n,
-                    required,
-                )
 
                 onward_unvisited = sum(
                     1 for nn in G.neighbors(n)
                     if nn not in visited and nn != current
                 )
-                dead_end_penalty = 1.0 if onward_unvisited == 0 and capability_match == 0.0 else 0.0
-
-                score = (
-                    5.0 * capability_match
-                    + 3.0 * recommended_match
-                    + 2.0 * global_hint
-                    + 1.5 * reliability
-                    + 1.0 * resource
-                    - 2.0 * load
-                    - 1.0 * congestion
-                    - 4.0 * latency_norm
-                    - 4.0 * distance_to_required_norm
-                    - 2.0 * dead_end_penalty
+                dead_end_penalty = (
+                    1.0 if onward_unvisited == 0 and capability_match == 0.0 else 0.0
                 )
 
-                explanation = (
-                    f"from={current}->to={n}; "
-                    f"coordinator_context=({coordinator_context}); "
-                    f"capability_match={capability_match}; "
-                    f"recommended_by_global={recommended_match}; "
-                    f"global_guidance={global_hint:.3f}; "
-                    f"reliability={reliability:.3f}; "
-                    f"resource={resource:.3f}; "
-                    f"load={load:.3f}; "
-                    f"latency={latency:.3f}; "
-                    f"dist_to_required_norm={distance_to_required_norm:.3f}; "
-                    f"dead_end_penalty={dead_end_penalty:.3f}; "
-                    f"score={score:.3f}"
-                )
+                candidate_rows.append({
+                    "node": n,
+                    "step_cost": step_cost,
+                    "remaining_cost": remaining_cost,
+                    "total_cost": total_cost,
+                    "capability_match": capability_match,
+                    "recommended_match": recommended_match,
+                    "global_hint": global_hint,
+                    "reliability": reliability,
+                    "resource": resource,
+                    "load": load,
+                    "latency": latency,
+                    "congestion": congestion,
+                    "distance_to_required_norm": distance_to_required_norm,
+                    "dead_end_penalty": dead_end_penalty,
+                })
 
-                if score > best_score:
-                    best_score = score
-                    best_neighbor = n
-                    best_explanation = explanation
-
-            used_fallback = False
-            if best_neighbor is None or best_score < self.min_confidence_score:
+            if not candidate_rows:
                 fallback_neighbor, fallback_reason = self._fallback_next_hop(
                     G,
                     agents,
@@ -353,17 +421,65 @@ class HybridXAIRouter(BaseRouter):
                     required,
                     visited,
                 )
-                if fallback_neighbor is not None:
-                    best_neighbor = fallback_neighbor
-                    used_fallback = True
-                    best_explanation = (
-                        f"from={current}->to={best_neighbor}; {fallback_reason}; "
-                        f"trigger_score={best_score:.3f}; "
-                        f"coordinator_context=({coordinator_context})"
+
+                if fallback_neighbor is None:
+                    break
+
+                best_neighbor = fallback_neighbor
+                best_explanation = (
+                    f"from={current}->to={best_neighbor}; {fallback_reason}; "
+                    f"coordinator_context=({coordinator_context})"
+                )
+
+            else:
+                # Step 1: find the lowest estimated latency route.
+                best_total_cost = min(row["total_cost"] for row in candidate_rows)
+
+                # Step 2: keep only candidates close to the best latency route.
+                latency_bound = best_total_cost * (1.0 + LATENCY_BOUND_EPSILON)
+
+                feasible_rows = [
+                    row for row in candidate_rows
+                    if row["total_cost"] <= latency_bound
+                ]
+
+                # Step 3: among near-best latency choices, select by quality/XAI factors.
+                for row in feasible_rows:
+                    row["tie_score"] = (
+                        3.0 * row["capability_match"]
+                        + 2.0 * row["recommended_match"]
+                        + 2.0 * row["global_hint"]
+                        + 0.75 * row["reliability"]
+                        + 0.25 * row["resource"]
+                        - 0.50 * row["load"]
+                        - 0.25 * row["congestion"]
+                        - 0.50 * row["dead_end_penalty"]
                     )
 
-            if best_neighbor is None:
-                break
+                winner = max(feasible_rows, key=lambda row: row["tie_score"])
+
+                best_neighbor = winner["node"]
+
+                best_explanation = (
+                    f"from={current}->to={best_neighbor}; "
+                    f"coordinator_context=({coordinator_context}); "
+                    f"selection=latency_bounded_xai; "
+                    f"step_cost={winner['step_cost']:.3f}; "
+                    f"remaining_cost={winner['remaining_cost']:.3f}; "
+                    f"total_cost={winner['total_cost']:.3f}; "
+                    f"latency_bound={latency_bound:.3f}; "
+                    f"capability_match={winner['capability_match']}; "
+                    f"recommended_by_global={winner['recommended_match']}; "
+                    f"global_guidance={winner['global_hint']:.3f}; "
+                    f"reliability={winner['reliability']:.3f}; "
+                    f"resource={winner['resource']:.3f}; "
+                    f"load={winner['load']:.3f}; "
+                    f"latency={winner['latency']:.3f}; "
+                    f"congestion={winner['congestion']:.3f}; "
+                    f"dist_to_required_norm={winner['distance_to_required_norm']:.3f}; "
+                    f"dead_end_penalty={winner['dead_end_penalty']:.3f}; "
+                    f"tie_score={winner['tie_score']:.3f}"
+                )
 
             current = best_neighbor
             path.append(current)
@@ -373,12 +489,15 @@ class HybridXAIRouter(BaseRouter):
             if required in agents[current].capabilities:
                 break
 
+        # Cache only successful routes.
+        if path and required in agents[path[-1]].capabilities:
+            self.route_cache.put(cache_key, path)
+
         return RouteDecision(
             path=path,
             explanation=" | ".join(explanations),
-            extra_overhead=0.1
+            extra_overhead=0.1,
         )
-    
 
 class LearnedHybridXAIRouter(BaseRouter):
     name = "LearnedHybridXAI"
@@ -389,6 +508,12 @@ class LearnedHybridXAIRouter(BaseRouter):
         self.extractor = FeatureExtractor()
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         current = task.source
         required = task.required_capability
 
@@ -471,6 +596,12 @@ class NeuralHybridXAIRouter(BaseRouter):
         self.extractor = NNFeatureExtractor()
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         current = task.source
         required = task.required_capability
 
@@ -551,6 +682,12 @@ class GNNHybridXAIRouter(BaseRouter):
         self.learner = learner
 
     def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(
+                path=[task.source],
+                explanation="",
+                extra_overhead=0.0,
+            )
         current = task.source
         required = task.required_capability
 

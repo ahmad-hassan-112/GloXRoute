@@ -383,7 +383,8 @@ class GNNHybridLearner:
     def predict_score(self, current_node, candidate_node, required_capability):
         self.encoder.eval()
         self.scorer.eval()
-        with torch.no_grad():
+
+        with torch.inference_mode():
             current_idx = torch.tensor([current_node], dtype=torch.long, device=self.device)
             candidate_idx = torch.tensor([candidate_node], dtype=torch.long, device=self.device)
             required_idx = torch.tensor([self.cap_to_idx[required_capability]], dtype=torch.long, device=self.device)
