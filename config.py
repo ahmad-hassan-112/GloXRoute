@@ -1,3 +1,5 @@
+import os as _os
+
 SEED = 42
 
 NUM_AGENTS = 100
@@ -63,3 +65,29 @@ CONGESTION_SCENARIO = False
 # GloXRoute-LB settings
 LATENCY_BOUND_EPSILON = 0.02
 ROUTE_CACHE_MAXSIZE = 8192
+
+
+def _env_int(name, default):
+    return int(_os.environ.get(name, default))
+
+
+def _env_float(name, default):
+    return float(_os.environ.get(name, default))
+
+
+def _env_bool(name, default):
+    value = _os.environ.get(name, None)
+    if value is None:
+        return default
+    return value.lower() in ("1", "true", "yes", "y")
+
+
+SEED = _env_int("GLOX_SEED", SEED)
+NUM_AGENTS = _env_int("GLOX_NUM_AGENTS", NUM_AGENTS)
+NUM_TASKS = _env_int("GLOX_NUM_TASKS", NUM_TASKS)
+
+PROTOCOL_MODE = _os.environ.get("GLOX_PROTOCOL_MODE", PROTOCOL_MODE)
+FAILURE_RATE = _env_float("GLOX_FAILURE_RATE", FAILURE_RATE)
+CONGESTION_SCENARIO = _env_bool("GLOX_CONGESTION_SCENARIO", CONGESTION_SCENARIO)
+
+SCENARIO_NAME = _os.environ.get("GLOX_SCENARIO_NAME", "normal")

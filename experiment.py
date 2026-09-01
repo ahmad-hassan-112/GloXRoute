@@ -36,6 +36,8 @@ from nn_learning import NeuralHybridLearner
 from gnn_learning import GNNHybridLearner
 from logging_utils import get_logger
 
+from config import SCENARIO_NAME, SEED
+
 
 class ExperimentRunner:
     def __init__(self, mode="all", model_dir=None):
@@ -48,7 +50,7 @@ class ExperimentRunner:
         self.model_dir = model_dir or os.path.join(OUTPUT_DIR, "models", "latest")
 
         run_stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        self.run_output_dir = os.path.join(OUTPUT_DIR, run_stamp)
+        self.run_output_dir = os.path.join(OUTPUT_DIR, f"{run_stamp}_{SCENARIO_NAME}_seed{SEED}")
         os.makedirs(self.run_output_dir, exist_ok=True)  # Ensure the run-specific directory exists
 
         # Path for logging experiment progress and info
