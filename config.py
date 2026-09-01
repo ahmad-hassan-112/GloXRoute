@@ -1,13 +1,33 @@
-import os as _os
+# ============================================================
+# GloXRoute — configuration
+# ============================================================
+import random, numpy as np
 
-SEED = 42
+# ------------------------------------------------------------------
+# Reproducibility
+# ------------------------------------------------------------------
+SEED = 42          # default single seed; multi-seed runner overrides this
+SEEDS = [42, 123, 456, 789, 1234, 2024, 3141, 9999, 31415, 27182,
+         11, 22, 33, 44, 55, 66, 77, 88, 99, 100]   # 20 seeds
 
+# ------------------------------------------------------------------
+# Network  (will be overridden by topology experiments)
+# ------------------------------------------------------------------
 NUM_AGENTS = 100
-NUM_TASKS = 20000
-MAX_HOPS = 15
+NUM_TASKS  = 2000          # test tasks per seed
+
+TOPOLOGY  = "barabasi_albert"   # "erdos_renyi" | "barabasi_albert" | "watts_strogatz"
+BA_M      = 3                   # BA: edges per new node
+WS_K      = 6                   # WS: each node connected to k neighbours
+WS_BETA   = 0.3                 # WS: rewiring probability
+
+MAX_HOPS  = 20
 
 OUTPUT_DIR = "outputs"
 
+# ------------------------------------------------------------------
+# Capabilities  — kept sparse so routing is non-trivial
+# ------------------------------------------------------------------
 CAPABILITIES = [
     "search",
     "reasoning",
@@ -19,75 +39,43 @@ CAPABILITIES = [
     "storage",
 ]
 
-PROTOCOLS = [
-    "A2A",
-    "MCP",
-    "REST",
-    "JSON-RPC",
-]
+# How many capabilities each agent gets (1 = scarce, harder routing)
+CAPS_PER_AGENT_MIN = 1
+CAPS_PER_AGENT_MAX = 1    # keep at 1 for hard/scarce regime
 
+PROTOCOLS = ["A2A", "MCP", "REST", "JSON-RPC"]
+
+# ------------------------------------------------------------------
+# Scenario knobs
+# ------------------------------------------------------------------
+FAILURE_RATE        = 0.0      # fraction of agents that fail
+CONGESTION_SCENARIO = False    # if True, 30 % of agents get load drawn from Beta(5,1)
+CONGESTION_FRACTION = 0.30     # fraction of agents that are "hot" under congestion
 COORDINATOR_UPDATE_INTERVAL = 10
 
-# Neural network training settings
-
-
-
-NN_HIDDEN_1 = 64
-NN_HIDDEN_2 = 32
-NN_DROPOUT = 0.10
-NN_EPOCHS = 200
-NN_BATCH_SIZE = 128
-NN_LEARNING_RATE = 0.001
-
-TRAIN_TASK_RATIO = 0.70
-VALIDATION_RATIO = 0.20
-
-
-# improving
-
-# PROTOCOL_MODE = "hard_block"
-# FAILURE_RATE = 0.10
-
-# Protocol / heterogeneity settings
-PROTOCOL_MODE = "soft_penalty"   # options: "none", "soft_penalty", "hard_block"
+# ------------------------------------------------------------------
+# Protocol
+# ------------------------------------------------------------------
+PROTOCOL_MODE    = "soft_penalty"   # "none" | "soft_penalty" | "hard_block"
 PROTOCOL_PENALTY = 2.0
-
-# Congestion settings
 CONGESTION_LAMBDA = 1.0
 
-# Evaluation settings
+# ------------------------------------------------------------------
+# Neural / GNN  (kept for legacy; not used in main experiments)
+# ------------------------------------------------------------------
+NN_HIDDEN_1      = 64
+NN_HIDDEN_2      = 32
+NN_DROPOUT       = 0.10
+NN_EPOCHS        = 200
+NN_BATCH_SIZE    = 128
+NN_LEARNING_RATE = 0.001
+
+TRAIN_TASK_RATIO  = 0.70
+VALIDATION_RATIO  = 0.20
+
+# ------------------------------------------------------------------
+# Evaluation
+# ------------------------------------------------------------------
 PATH_STRETCH_INF_CAP = 10.0
-
-# Scenario settings
-FAILURE_RATE = 0.0
-CONGESTION_SCENARIO = False
-
-# GloXRoute-LB settings
 LATENCY_BOUND_EPSILON = 0.02
-ROUTE_CACHE_MAXSIZE = 8192
-
-
-def _env_int(name, default):
-    return int(_os.environ.get(name, default))
-
-
-def _env_float(name, default):
-    return float(_os.environ.get(name, default))
-
-
-def _env_bool(name, default):
-    value = _os.environ.get(name, None)
-    if value is None:
-        return default
-    return value.lower() in ("1", "true", "yes", "y")
-
-
-SEED = _env_int("GLOX_SEED", SEED)
-NUM_AGENTS = _env_int("GLOX_NUM_AGENTS", NUM_AGENTS)
-NUM_TASKS = _env_int("GLOX_NUM_TASKS", NUM_TASKS)
-
-PROTOCOL_MODE = _os.environ.get("GLOX_PROTOCOL_MODE", PROTOCOL_MODE)
-FAILURE_RATE = _env_float("GLOX_FAILURE_RATE", FAILURE_RATE)
-CONGESTION_SCENARIO = _env_bool("GLOX_CONGESTION_SCENARIO", CONGESTION_SCENARIO)
-
-SCENARIO_NAME = _os.environ.get("GLOX_SCENARIO_NAME", "normal")
+ROUTE_CACHE_MAXSIZE   = 8192
