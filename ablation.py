@@ -1,4 +1,3 @@
-
 """
 ablation.py — Ablation study for GloXRoute.
 
@@ -22,6 +21,7 @@ import networkx as nx
 from typing import Dict, List, Optional
 from collections import OrderedDict
 
+from config import TIE_BREAK_TOP_K
 from config import (
     SEED, SEEDS, NUM_TASKS, OUTPUT_DIR, COORDINATOR_UPDATE_INTERVAL,
     TOPOLOGY, NUM_AGENTS, LATENCY_BOUND_EPSILON, ROUTE_CACHE_MAXSIZE, MAX_HOPS,
@@ -134,6 +134,11 @@ class AblatedHybridXAIRouter:
             best_total = min(r["total_cost"] for r in rows)
             bound      = best_total * (1.0 + LATENCY_BOUND_EPSILON)
             feasible   = [r for r in rows if r["total_cost"] <= bound]
+            # On low-degree graphs the percentage window can admit only 1
+            # candidate; top-up with the next-cheapest options so the score
+            # terms are actually exercised (see TIE_BREAK_TOP_K in config.py).
+            if len(feasible) < TIE_BREAK_TOP_K:
+                feasible = sorted(rows, key=lambda r: r["total_cost"])[:TIE_BREAK_TOP_K]
             w          = max(feasible, key=lambda r: r["tie_score"])
             best_n     = w["node"]
 

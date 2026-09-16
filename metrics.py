@@ -4,7 +4,7 @@ import math
 import networkx as nx
 
 from models import Agent, Task
-from utils import path_effective_latency
+from utils import path_effective_latency, shortest_capability_latency
 
 
 @dataclass
@@ -33,6 +33,9 @@ class RouteResult:
 
     # New XAI metrics
     explanation_length: int
+
+    # Deadline / QoS metric (priority-scaled)
+    deadline_miss: bool
 
 
 def _safe_latency(G: nx.Graph, path: List[int]) -> float:
@@ -146,7 +149,13 @@ def evaluate_route(
         and _has_required_capability(agents, path[-1], task.required_capability)
     )
 
-    success = (
+    # A route that traverses a failed/blocked edge is NOT a success, even if
+    # the final node has the capability. Previously such routes were counted
+    # as successful while reporting inf effective latency, which both inflated
+    # success_rate and destroyed the effective-latency mean.
+    route_is_traversable = not math.isinf(effective_latency)
+
+    success = route_is_traversable and (
         valid_path
         and reached_capable_agent
         and latency != float("inf")
@@ -167,6 +176,15 @@ def evaluate_route(
 
     communication_overhead = hops + float(extra_overhead)
 
+    # Deadline miss: effective latency exceeds (deadline_factor x best achievable)
+    best_effective = shortest_capability_latency(G, agents, task)
+    if math.isinf(best_effective) or math.isinf(effective_latency):
+        deadline_miss = True
+    elif best_effective <= 0.0:
+        deadline_miss = False
+    else:
+        deadline_miss = effective_latency > (float(task.deadline) * best_effective)
+
     result = RouteResult(
         method=method_name,
         task_id=task.task_id,
@@ -186,6 +204,7 @@ def evaluate_route(
         explanation_length=_explanation_length(explanation),
         explanation=str(explanation) if explanation else "",
         source_capable=source_capable,
+        deadline_miss=deadline_miss,
     )
 
     row = result.__dict__

@@ -22,6 +22,7 @@ from config import (
     TOPOLOGY, BA_M, WS_K, WS_BETA,
     CAPS_PER_AGENT_MIN, CAPS_PER_AGENT_MAX,
     FAILURE_RATE, CONGESTION_SCENARIO, CONGESTION_FRACTION,
+    CAPABILITY_ZIPF_EXPONENT, MIN_AGENTS_PER_CAPABILITY,
 )
 from models import Agent
 
@@ -91,34 +92,99 @@ def create_network(
 #  Agent builder                                                       #
 # ------------------------------------------------------------------ #
 
+def _capability_quota(num_agents: int) -> dict:
+    """
+    Decide how many agents hold each capability, following a Zipf
+    distribution so that some capabilities are genuinely SCARCE.
+
+    With exponent=1.5 and 100 agents over 8 capabilities this yields
+    roughly {52, 18, 10, 7, 5, 4, 3, 2} holders — a 26x range between
+    the most common and rarest capability. Routing to a rare capability
+    then requires real multi-hop search.
+    """
+    n_caps  = len(CAPABILITIES)
+    weights = np.array(
+        [1.0 / ((i + 1) ** CAPABILITY_ZIPF_EXPONENT) for i in range(n_caps)]
+    )
+    weights = weights / weights.sum()
+
+    quota = np.floor(weights * num_agents).astype(int)
+    quota = np.maximum(quota, MIN_AGENTS_PER_CAPABILITY)
+
+    # print("🚀 ~ _capability_quota ~ quota:", quota)
+
+    # Reconcile so total assignments == num_agents (1 capability per agent)
+    diff = num_agents - int(quota.sum())
+    i = 0
+    while diff != 0:
+        # print("🚀 ~ _capability_quota ~ diff:", diff)
+        idx = i % n_caps
+        if diff > 0:
+            quota[idx] += 1
+            diff -= 1
+        elif quota[idx] > MIN_AGENTS_PER_CAPABILITY:
+            quota[idx] -= 1
+            diff += 1
+        i += 1
+
+    # print("🚀 ~ _capability_quota ~ {CAPABILITIES[i]: int(quota[i]) for i in range(n_caps)}:", {CAPABILITIES[i]: int(quota[i]) for i in range(n_caps)})
+    return {CAPABILITIES[i]: int(quota[i]) for i in range(n_caps)}
+
+
 def create_agents(G: nx.Graph, seed: int = 42) -> Dict[int, Agent]:
     rng = np.random.default_rng(seed + 1)
     random.seed(seed + 2)
 
-    agents = {}
-    for node in G.nodes():
-        n_caps = int(rng.integers(CAPS_PER_AGENT_MIN, CAPS_PER_AGENT_MAX + 1))
-        caps   = set(random.sample(CAPABILITIES, n_caps))
+    nodes = list(G.nodes())
 
-        # Under a congestion scenario, make CONGESTION_FRACTION of agents very busy
+    # --- Assign capabilities according to the scarcity quota -------------
+    quota = _capability_quota(len(nodes))
+    cap_pool = []
+    for cap, count in quota.items():
+        cap_pool.extend([cap] * count)
+    rng.shuffle(cap_pool)
+    # Guard against off-by-one
+    while len(cap_pool) < len(nodes):
+        cap_pool.append(CAPABILITIES[0])
+    cap_pool = cap_pool[:len(nodes)]
+
+    agents = {}
+    for i, node in enumerate(nodes):
+        caps = {cap_pool[i]}
+
+        # Extra capabilities if configured (default: none)
+        extra = int(rng.integers(CAPS_PER_AGENT_MIN, CAPS_PER_AGENT_MAX + 1)) - 1
+        if extra > 0:
+            caps |= set(random.sample(CAPABILITIES, extra))
+
+        # Congestion scenario: a fraction of agents become heavily loaded
         if CONGESTION_SCENARIO and rng.random() < CONGESTION_FRACTION:
-            load = float(rng.beta(5, 1))     # heavy-tail towards 1
+            load = float(rng.beta(5, 1))          # heavy tail toward 1
         else:
-            load = float(rng.uniform(0.0, 0.5))   # low load otherwise
+            load = float(rng.uniform(0.0, 0.5))
 
         failed = FAILURE_RATE > 0 and rng.random() < FAILURE_RATE
 
         agents[node] = Agent(
-            agent_id    = node,
+            agent_id     = node,
             capabilities = caps,
-            reliability = float(rng.uniform(0.65, 0.99)),
-            load        = load,
-            resource    = float(rng.uniform(0.4, 1.0)),
-            protocol    = random.choice(PROTOCOLS),
-            failed      = failed,
+            reliability  = float(rng.uniform(0.65, 0.99)),
+            load         = load,
+            resource     = float(rng.uniform(0.4, 1.0)),
+            protocol     = random.choice(PROTOCOLS),
+            failed       = failed,
         )
 
     return agents
+
+
+def capability_distribution(agents: Dict[int, Agent]) -> dict:
+    """Report how many agents hold each capability (for the paper)."""
+    counts = {c: 0 for c in CAPABILITIES}
+    for a in agents.values():
+        for c in a.capabilities:
+            counts[c] = counts.get(c, 0) + 1
+    return counts
 
 
 # ------------------------------------------------------------------ #

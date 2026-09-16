@@ -23,8 +23,9 @@ from collections import OrderedDict
 from typing import Dict, Optional
 
 import networkx as nx
+import numpy as np
 
-from config import MAX_HOPS, LATENCY_BOUND_EPSILON, ROUTE_CACHE_MAXSIZE, PROTOCOL_PENALTY
+from config import MAX_HOPS, LATENCY_BOUND_EPSILON, ROUTE_CACHE_MAXSIZE, PROTOCOL_PENALTY, TIE_BREAK_TOP_K
 from coordinator import GlobalCoordinator
 from models import Agent, Task, RouteDecision
 from utils import capable_nodes, path_latency, source_can_solve, effective_edge_weight
@@ -144,7 +145,7 @@ class DecentralizedGreedyRouter(BaseRouter):
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
@@ -193,7 +194,7 @@ class BiRouterStyleRouter(BaseRouter):
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
@@ -214,6 +215,208 @@ class BiRouterStyleRouter(BaseRouter):
                 if score > best_s:
                     best_s, best_n = score, n
 
+            current = best_n
+            path.append(current)
+            visited.add(current)
+
+        return RouteDecision(path=path, explanation="", extra_overhead=0.0)
+
+
+# ================================================================== #
+#  Multi-Criteria Decision Making (MADM) baselines                     #
+# ================================================================== #
+#
+# These two baselines isolate the contribution of GloXRoute's GLOBAL
+# COORDINATION from the contribution of merely combining multiple
+# attributes. They score candidates using the SAME criteria available
+# to HybridXAI (capability, reliability, resource, load, protocol
+# compatibility, link latency) but combine them with standard, textbook
+# MADM rules and WITHOUT any coordinator guidance.
+#
+# If GloXRoute outperforms these, the improvement is attributable to
+# global coordination rather than to multi-attribute scoring alone.
+#
+# References:
+#   SAW    - Simple Additive Weighting / Weighted Sum Model; the
+#            classical MADM aggregation rule (Fishburn 1967; MacCrimmon 1968).
+#   TOPSIS - Technique for Order of Preference by Similarity to Ideal
+#            Solution (Hwang & Yoon, 1981).
+
+# Shared criteria set used by BOTH MADM baselines.
+#   name, weight, is_benefit  (benefit = higher is better)
+MADM_CRITERIA = [
+    ("capability_match", 0.30, True),   # candidate provides required capability
+    ("progress",         0.25, True),   # 1/(1+hops-to-nearest-capable), local estimate
+    ("reliability",      0.15, True),
+    ("protocol_match",   0.10, True),
+    ("resource",         0.05, True),
+    ("load",             0.10, False),  # cost criterion
+    ("latency",          0.05, False),  # cost criterion
+]
+
+
+def _madm_local_progress(G, agents, candidate, required, visited):
+    """
+    Purely LOCAL estimate of progress toward a capable agent: inverse of
+    the hop distance to the nearest capable agent, computed with an
+    unweighted BFS limited to a small radius. Deliberately does NOT use
+    the coordinator -- these baselines must remain coordination-free.
+    """
+    if required in agents[candidate].capabilities:
+        return 1.0
+    # bounded BFS (radius 3) so this stays a *local* heuristic
+    frontier = {candidate}
+    seen = {candidate}
+    for depth in range(1, 4):
+        nxt = set()
+        for u in frontier:
+            for v in G.neighbors(u):
+                if v in seen or getattr(agents[v], "failed", False):
+                    continue
+                if required in agents[v].capabilities:
+                    return 1.0 / (1.0 + depth)
+                seen.add(v)
+                nxt.add(v)
+        frontier = nxt
+        if not frontier:
+            break
+    return 0.0
+
+
+def _madm_decision_matrix(G, agents, current, required, candidates, visited):
+    """
+    Build the decision matrix for the MADM baselines: one row per
+    candidate neighbour, one column per criterion in MADM_CRITERIA.
+    """
+    rows = []
+    for n in candidates:
+        edge = G[current][n]
+        rows.append([
+            1.0 if required in agents[n].capabilities else 0.0,
+            _madm_local_progress(G, agents, n, required, visited),
+            agents[n].reliability,
+            1.0 if agents[current].protocol == agents[n].protocol else 0.0,
+            agents[n].resource,
+            agents[n].load,
+            float(edge["latency"]),
+        ])
+    return np.array(rows, dtype=float)
+
+
+class SAWRouter(BaseRouter):
+    """
+    Simple Additive Weighting (SAW) multi-criteria routing baseline.
+
+    At each hop, candidate neighbours are scored by a weighted sum of
+    min-max normalised criteria, with cost criteria (load, latency)
+    inverted so that higher is always better. No global coordination.
+
+    Reference: Simple Additive Weighting / Weighted Sum Model, the
+    classical MADM aggregation rule.
+    """
+    name = "SAW_MADM"
+
+    def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(path=[task.source], explanation="", extra_overhead=0.0)
+
+        current, required = task.source, task.required_capability
+        path, visited = [current], {current}
+
+        for _ in range(MAX_HOPS):
+            if required in agents[current].capabilities:
+                break
+            candidates = [n for n in G.neighbors(current)
+                          if n not in visited and not getattr(agents[n], "failed", False)]
+            if not candidates:
+                break
+
+            M = _madm_decision_matrix(G, agents, current, required, candidates, visited)
+
+            # Min-max normalise each criterion column to [0, 1],
+            # orienting every column so that larger == better.
+            norm = np.zeros_like(M)
+            for j, (_, _, is_benefit) in enumerate(MADM_CRITERIA):
+                col = M[:, j]
+                lo, hi = col.min(), col.max()
+                if hi - lo < 1e-12:
+                    norm[:, j] = 1.0        # criterion does not discriminate
+                elif is_benefit:
+                    norm[:, j] = (col - lo) / (hi - lo)
+                else:
+                    norm[:, j] = (hi - col) / (hi - lo)
+
+            weights = np.array([w for _, w, _ in MADM_CRITERIA])
+            scores  = norm @ weights
+
+            best_n = candidates[int(np.argmax(scores))]
+            current = best_n
+            path.append(current)
+            visited.add(current)
+
+        return RouteDecision(path=path, explanation="", extra_overhead=0.0)
+
+
+class TOPSISRouter(BaseRouter):
+    """
+    TOPSIS multi-criteria routing baseline.
+
+    At each hop the candidate neighbours form a decision matrix which is
+    vector-normalised and weighted; the positive-ideal and negative-ideal
+    solutions are derived per criterion, and the candidate with the
+    highest relative closeness to the positive ideal is selected.
+    No global coordination.
+
+    Reference: Hwang, C.-L. & Yoon, K. (1981). Multiple Attribute
+    Decision Making: Methods and Applications.
+    """
+    name = "TOPSIS_MADM"
+
+    def route(self, G, agents, task):
+        if source_can_solve(agents, task):
+            return RouteDecision(path=[task.source], explanation="", extra_overhead=0.0)
+
+        current, required = task.source, task.required_capability
+        path, visited = [current], {current}
+
+        for _ in range(MAX_HOPS):
+            if required in agents[current].capabilities:
+                break
+            candidates = [n for n in G.neighbors(current)
+                          if n not in visited and not getattr(agents[n], "failed", False)]
+            if not candidates:
+                break
+
+            M = _madm_decision_matrix(G, agents, current, required, candidates, visited)
+            weights = np.array([w for _, w, _ in MADM_CRITERIA])
+
+            # Step 1: vector normalisation  r_ij = x_ij / sqrt(sum_i x_ij^2)
+            denom = np.sqrt((M ** 2).sum(axis=0))
+            denom[denom < 1e-12] = 1.0
+            R = M / denom
+
+            # Step 2: weighted normalised matrix
+            V = R * weights
+
+            # Step 3: positive-ideal (A+) and negative-ideal (A-) solutions.
+            # For benefit criteria A+ takes the max, for cost criteria the min.
+            a_pos, a_neg = np.zeros(V.shape[1]), np.zeros(V.shape[1])
+            for j, (_, _, is_benefit) in enumerate(MADM_CRITERIA):
+                if is_benefit:
+                    a_pos[j], a_neg[j] = V[:, j].max(), V[:, j].min()
+                else:
+                    a_pos[j], a_neg[j] = V[:, j].min(), V[:, j].max()
+
+            # Step 4: Euclidean separation from the ideal solutions
+            d_pos = np.sqrt(((V - a_pos) ** 2).sum(axis=1))
+            d_neg = np.sqrt(((V - a_neg) ** 2).sum(axis=1))
+
+            # Step 5: relative closeness  C_i = d- / (d+ + d-)
+            denom_c = d_pos + d_neg
+            denom_c[denom_c < 1e-12] = 1.0
+            closeness = d_neg / denom_c
+
+            best_n = candidates[int(np.argmax(closeness))]
             current = best_n
             path.append(current)
             visited.add(current)
@@ -247,21 +450,41 @@ class HybridXAIRouter(BaseRouter):
         self.coordinator  = coordinator
         self.route_cache  = RouteCache(maxsize=ROUTE_CACHE_MAXSIZE)
         self.name         = router_name
+        self._fallback_dist_cache = {}
 
     # -------------------------------------------------------------- #
     def _distance_to_capable_norm(self, G, agents, candidate, required) -> float:
-        """Fallback: BFS distance to nearest capable agent, normalised."""
-        best = float("inf")
-        for target in capable_nodes(agents, required):
-            try:
-                d = nx.shortest_path_length(G, candidate, target, weight="latency")
-                if d < best:
-                    best = d
-            except nx.NetworkXNoPath:
-                continue
-        if math.isinf(best):
+        """
+        Fallback: distance to nearest capable agent, normalised.
+        CACHED per (candidate, required) within a single routing call to avoid
+        O(candidates) redundant shortest-path searches per hop, which was the
+        main scalability bottleneck at large node counts (500+).
+        """
+        cache_key = (candidate, required)
+        if cache_key in self._fallback_dist_cache:
+            return self._fallback_dist_cache[cache_key]
+
+        # Single multi-source Dijkstra from all capable (non-failed) targets,
+        # instead of one shortest_path_length call per target per candidate.
+        targets = [
+            t for t in capable_nodes(agents, required)
+            if not getattr(agents[t], "failed", False)
+        ]
+        if not targets:
+            self._fallback_dist_cache[cache_key] = 1.0
             return 1.0
-        return best / (10.0 * max(1, len(G.nodes())))
+
+        try:
+            distances = nx.multi_source_dijkstra_path_length(
+                G, sources=set(targets), weight="latency"
+            )
+            best = distances.get(candidate, float("inf"))
+        except Exception:
+            best = float("inf")
+
+        result = 1.0 if math.isinf(best) else best / (10.0 * max(1, len(G.nodes())))
+        self._fallback_dist_cache[cache_key] = result
+        return result
 
     def _fallback_hop(self, G, agents, current, required, visited):
         """If no scored candidate passes filters, fall back to Dijkstra."""
@@ -293,6 +516,8 @@ class HybridXAIRouter(BaseRouter):
         if source_can_solve(agents, task):
             return RouteDecision(path=[task.source], explanation="", extra_overhead=0.0)
 
+        self._fallback_dist_cache.clear()
+
         cache_key = (
             int(task.source),
             str(task.required_capability),
@@ -315,7 +540,7 @@ class HybridXAIRouter(BaseRouter):
             if required in agents[current].capabilities:
                 break
 
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
@@ -390,6 +615,8 @@ class HybridXAIRouter(BaseRouter):
                 best_total = min(r["total_cost"] for r in rows)
                 bound      = best_total * (1.0 + LATENCY_BOUND_EPSILON)
                 feasible   = [r for r in rows if r["total_cost"] <= bound]
+                if len(feasible) < TIE_BREAK_TOP_K:
+                    feasible = sorted(rows, key=lambda r: r["total_cost"])[:TIE_BREAK_TOP_K]
 
                 for r in feasible:
                     r["tie_score"] = (
@@ -465,7 +692,7 @@ class LearnedHybridXAIRouter(BaseRouter):
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
@@ -511,7 +738,7 @@ class NeuralHybridXAIRouter(BaseRouter):
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
@@ -552,7 +779,7 @@ class GNNHybridXAIRouter(BaseRouter):
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-            candidates = [n for n in G.neighbors(current) if n not in visited]
+            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
             if not candidates:
                 break
 
