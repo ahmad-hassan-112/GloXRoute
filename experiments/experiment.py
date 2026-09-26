@@ -21,6 +21,7 @@ import pandas as pd
 import networkx as nx
 from typing import Dict, List, Optional
 from scipy import stats as scipy_stats
+from core.config import TASK_MODE
 
 from core.config import (
     SEED, SEEDS, NUM_TASKS, OUTPUT_DIR, COORDINATOR_UPDATE_INTERVAL,
@@ -188,8 +189,7 @@ class GloXRouteExperiment:
         from core.network_builder import capability_distribution
         capdist = capability_distribution(self.agents)
         logger.info("Capability distribution (agents holding each): %s", capdist)
-        logger.info("Tasks generated: %d (mode=%s)", len(all_tasks),
-                    __import__("config").TASK_MODE)
+        logger.info("Tasks generated: %d (mode=%s)", len(all_tasks), TASK_MODE)
         self.num_tasks = len(all_tasks)
 
         # Persist the exact network + task set tested, so results can be
