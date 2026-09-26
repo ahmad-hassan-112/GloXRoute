@@ -27,23 +27,23 @@ from typing import List
 import numpy as np
 import pandas as pd
 
-from config import (
+from core.config import (
     SEEDS,
     OUTPUT_DIR,
     TOPOLOGY,
     COORDINATOR_UPDATE_INTERVAL
 )
 
-from network_builder import build_ioa_network
-from task_generator import generate_tasks
-from coordinator import GlobalCoordinator
-from routers import (
+from core.network_builder import build_ioa_network
+from core.task_generator import generate_tasks
+from core.coordinator import GlobalCoordinator
+from core.routers import (
     ShortestPathRouter,
     DecentralizedGreedyRouter,
     HybridXAIRouter,
 )
 
-from metrics import evaluate_route
+from core.metrics import evaluate_route
 
 
 logging.basicConfig(
@@ -431,7 +431,7 @@ if __name__ == "__main__":
 
 
 
-    import config as cfg
+    import core.config as cfg
 
 
     cfg.TOPOLOGY = args.topology

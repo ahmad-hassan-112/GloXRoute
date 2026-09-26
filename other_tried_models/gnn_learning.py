@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from config import (
+from core.config import (
     CAPABILITIES, PROTOCOLS, OUTPUT_DIR,
     MAX_HOPS, VALIDATION_RATIO,
 )

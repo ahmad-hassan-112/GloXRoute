@@ -21,17 +21,17 @@ import networkx as nx
 from typing import Dict, List, Optional
 from collections import OrderedDict
 
-from config import TIE_BREAK_TOP_K
-from config import (
+from core.config import TIE_BREAK_TOP_K
+from core.config import (
     SEED, SEEDS, NUM_TASKS, OUTPUT_DIR, COORDINATOR_UPDATE_INTERVAL,
     TOPOLOGY, NUM_AGENTS, LATENCY_BOUND_EPSILON, ROUTE_CACHE_MAXSIZE, MAX_HOPS,
 )
-from models import Agent, Task, RouteDecision
-from network_builder import build_ioa_network
-from task_generator import generate_tasks
-from coordinator import GlobalCoordinator
-from metrics import evaluate_route
-from utils import capable_nodes, source_can_solve, effective_edge_weight
+from core.models import Agent, Task, RouteDecision
+from core.network_builder import build_ioa_network
+from core.task_generator import generate_tasks
+from core.coordinator import GlobalCoordinator
+from core.metrics import evaluate_route
+from core.utils import capable_nodes, source_can_solve, effective_edge_weight
 import math
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -256,7 +256,7 @@ if __name__ == "__main__":
     p.add_argument("--out_dir",    default=None)
     args = p.parse_args()
 
-    import config as cfg
+    import core.config as cfg
     if args.topology:   cfg.TOPOLOGY   = args.topology
     if args.num_agents: cfg.NUM_AGENTS = args.num_agents
 

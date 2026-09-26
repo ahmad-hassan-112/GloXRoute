@@ -51,7 +51,7 @@ def main():
     args = _parse()
 
     # Override config knobs from CLI
-    import config as cfg
+    import core.config as cfg
 
     if args.topology:      cfg.TOPOLOGY          = args.topology
     if args.num_agents:    cfg.NUM_AGENTS         = args.num_agents
@@ -69,7 +69,7 @@ def main():
     out_dir = args.out_dir or os.path.join(cfg.OUTPUT_DIR, tag)
 
     if args.multiseed:
-        from experiment import run_multiseed
+        from experiments.experiment import run_multiseed
         logger.info("Multi-seed experiment: topology=%s, n=%d, tasks_per_seed=%d",
                     cfg.TOPOLOGY, cfg.NUM_AGENTS, cfg.NUM_TASKS)
         run_multiseed(
@@ -80,7 +80,7 @@ def main():
             out_dir    = out_dir,
         )
     else:
-        from experiment import GloXRouteExperiment
+        from experiments.experiment import GloXRouteExperiment
         seed = args.seed or cfg.SEED
         logger.info("Single-seed experiment: seed=%d topology=%s", seed, cfg.TOPOLOGY)
         exp = GloXRouteExperiment(

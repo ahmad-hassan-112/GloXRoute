@@ -1,10 +1,10 @@
 import networkx as nx
 from typing import Dict, List
-from models import Agent
+from core.models import Agent
 import math
 import networkx as nx
 
-from config import PROTOCOL_MODE, PROTOCOL_PENALTY, CONGESTION_LAMBDA
+from core.config import PROTOCOL_MODE, PROTOCOL_PENALTY, CONGESTION_LAMBDA
 
 
 def capable_nodes(agents: Dict[int, Agent], capability: str) -> List[int]:

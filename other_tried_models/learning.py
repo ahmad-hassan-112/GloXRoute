@@ -6,9 +6,9 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 
-from config import MAX_HOPS
-from models import Agent, Task
-from utils import capable_nodes, path_latency
+from core.config import MAX_HOPS
+from core.models import Agent, Task
+from core.utils import capable_nodes, path_latency
 
 
 class FeatureExtractor:

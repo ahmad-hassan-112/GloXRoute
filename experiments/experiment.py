@@ -22,15 +22,15 @@ import networkx as nx
 from typing import Dict, List, Optional
 from scipy import stats as scipy_stats
 
-from config import (
+from core.config import (
     SEED, SEEDS, NUM_TASKS, OUTPUT_DIR, COORDINATOR_UPDATE_INTERVAL,
     TOPOLOGY, NUM_AGENTS,
 )
-from models import Agent, Task
-from network_builder import build_ioa_network
-from task_generator import generate_tasks
-from coordinator import GlobalCoordinator, LearnedGlobalCoordinator
-from routers import (
+from core.models import Agent, Task
+from core.network_builder import build_ioa_network
+from core.task_generator import generate_tasks
+from core.coordinator import GlobalCoordinator, LearnedGlobalCoordinator
+from core.routers import (
     ShortestPathRouter,
     CentralizedRouter,
     DecentralizedGreedyRouter,
@@ -39,7 +39,7 @@ from routers import (
     TOPSISRouter,
     HybridXAIRouter,
 )
-from metrics import evaluate_route
+from core.metrics import evaluate_route
 
 logger = logging.getLogger("experiment")
 
@@ -185,7 +185,7 @@ class GloXRouteExperiment:
         all_tasks = generate_tasks(num_tasks=num_tasks, seed=seed, num_agents=num_agents)
         self.test_tasks = all_tasks
 
-        from network_builder import capability_distribution
+        from core.network_builder import capability_distribution
         capdist = capability_distribution(self.agents)
         logger.info("Capability distribution (agents holding each): %s", capdist)
         logger.info("Tasks generated: %d (mode=%s)", len(all_tasks),

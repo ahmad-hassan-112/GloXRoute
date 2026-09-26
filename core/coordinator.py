@@ -17,9 +17,9 @@ from typing import Dict, Optional
 import numpy as np
 import os
 
-from config import CAPABILITIES
-from models import Agent
-from utils import capable_nodes, effective_edge_weight
+from core.config import CAPABILITIES
+from core.models import Agent
+from core.utils import capable_nodes, effective_edge_weight
 
 
 class GlobalCoordinator:

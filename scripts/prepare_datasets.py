@@ -34,14 +34,14 @@ import numpy as np
 import pandas as pd
 from dataclasses import asdict
 
-from config import (
+from core.config import (
     OUTPUT_DIR, SEED, TRAIN_TASK_RATIO, VALIDATION_RATIO,
     TOPOLOGY, NUM_AGENTS,
 )
-from models import Task
-from network_builder import build_ioa_network, capability_distribution
-from task_generator import generate_tasks
-from coordinator import GlobalCoordinator
+from core.models import Task
+from core.network_builder import build_ioa_network, capability_distribution
+from core.task_generator import generate_tasks
+from core.coordinator import GlobalCoordinator
 
 DATASET_DIR = os.path.join(OUTPUT_DIR, "datasets")
 
@@ -78,7 +78,7 @@ def oracle_best_path(G, agents, task, coordinator):
     minimises it — training against it teaches the NN to mimic ShortestPath,
     which is the baseline we are trying to outperform.
     """
-    from utils import capable_nodes, effective_edge_weight
+    from core.utils import capable_nodes, effective_edge_weight
     import networkx as nx
 
     weight_fn = effective_edge_weight(agents)
@@ -134,7 +134,7 @@ NN_SCHEMA_VERSION = "v3"   # bump whenever feature list changes
 def extract_nn_features(G, agents, coordinator, current, candidate, required):
     """Extract features consistent with HybridXAIRouter's scoring terms."""
     import math
-    from utils import capable_nodes, effective_edge_weight
+    from core.utils import capable_nodes, effective_edge_weight
 
     cap_match  = 1.0 if required in agents[candidate].capabilities else 0.0
     hint       = coordinator.guidance[candidate][required]
@@ -186,7 +186,7 @@ def build_nn_dataset(G, agents, coordinator, tasks, save_path=None):
     Label=1 if this candidate is on the IoA-aware oracle path.
     """
     rows = []
-    from config import MAX_HOPS
+    from core.config import MAX_HOPS
     for task in tasks:
         if task.required_capability in agents[task.source].capabilities:
             continue
@@ -228,7 +228,7 @@ def build_gnn_dataset(G, agents, coordinator, tasks, save_path=None):
     Node features are built at training time from the live graph.
     """
     rows = []
-    from config import MAX_HOPS
+    from core.config import MAX_HOPS
     for task in tasks:
         if task.required_capability in agents[task.source].capabilities:
             continue

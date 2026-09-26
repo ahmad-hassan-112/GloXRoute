@@ -25,14 +25,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
-from config import (
+from core.config import (
     OUTPUT_DIR, NN_EPOCHS, NN_BATCH_SIZE, NN_LEARNING_RATE,
     NN_HIDDEN_1, NN_HIDDEN_2, NN_DROPOUT, VALIDATION_RATIO,
 )
 
 # Import the canonical feature list from prepare_datasets
 try:
-    from prepare_datasets import NN_FEATURE_NAMES, NN_SCHEMA_VERSION, extract_nn_features
+    from scripts.prepare_datasets import NN_FEATURE_NAMES, NN_SCHEMA_VERSION, extract_nn_features
 except ImportError:
     # fallback for standalone use
     NN_FEATURE_NAMES = [
@@ -43,7 +43,7 @@ except ImportError:
         "effective_latency_norm", "distance_to_required_norm", "two_hop_cap_ratio",
     ]
     NN_SCHEMA_VERSION = "v3"
-    from utils import capable_nodes, effective_edge_weight
+    from core.utils import capable_nodes, effective_edge_weight
     import math
 
     def extract_nn_features(G, agents, coordinator, current, candidate, required):

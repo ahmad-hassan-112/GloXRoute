@@ -17,14 +17,14 @@ import numpy as np
 import networkx as nx
 from typing import Dict, Tuple
 
-from config import (
+from core.config import (
     NUM_AGENTS, CAPABILITIES, PROTOCOLS,
     TOPOLOGY, BA_M, WS_K, WS_BETA,
     CAPS_PER_AGENT_MIN, CAPS_PER_AGENT_MAX,
     FAILURE_RATE, CONGESTION_SCENARIO, CONGESTION_FRACTION,
     CAPABILITY_ZIPF_EXPONENT, MIN_AGENTS_PER_CAPABILITY,
 )
-from models import Agent
+from core.models import Agent
 
 
 # ------------------------------------------------------------------ #

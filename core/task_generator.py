@@ -35,8 +35,8 @@ used by any router or metric.
 import random
 from typing import List
 
-from config import NUM_TASKS, NUM_AGENTS, CAPABILITIES, TASK_MODE
-from models import Task
+from core.config import NUM_TASKS, NUM_AGENTS, CAPABILITIES, TASK_MODE
+from core.models import Task
 
 
 def _make_task(task_id: int, source: int, cap: str, rng: random.Random) -> Task:

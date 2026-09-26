@@ -3,8 +3,8 @@ from typing import Dict, List, Optional
 import math
 import networkx as nx
 
-from models import Agent, Task
-from utils import path_effective_latency, shortest_capability_latency
+from core.models import Agent, Task
+from core.utils import path_effective_latency, shortest_capability_latency
 
 
 @dataclass

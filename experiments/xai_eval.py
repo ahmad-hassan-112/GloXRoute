@@ -30,12 +30,12 @@ import pandas as pd
 from typing import Dict, List, Tuple
 import math
 
-from config import SEED, NUM_AGENTS, NUM_TASKS, OUTPUT_DIR, TOPOLOGY, MAX_HOPS, LATENCY_BOUND_EPSILON
-from network_builder import build_ioa_network
-from task_generator import generate_tasks
-from coordinator import GlobalCoordinator
-from utils import capable_nodes, source_can_solve, effective_edge_weight
-from models import Task, RouteDecision
+from core.config import SEED, NUM_AGENTS, NUM_TASKS, OUTPUT_DIR, TOPOLOGY, MAX_HOPS, LATENCY_BOUND_EPSILON
+from core.network_builder import build_ioa_network
+from core.task_generator import generate_tasks
+from core.coordinator import GlobalCoordinator
+from core.utils import capable_nodes, source_can_solve, effective_edge_weight
+from core.models import Task, RouteDecision
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger("xai_eval")
