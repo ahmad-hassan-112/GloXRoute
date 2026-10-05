@@ -48,6 +48,9 @@ class GlobalCoordinator:
         # Track how many cache hits vs misses for overhead reporting
         self._cache_hits = 0
         self._cache_misses = 0
+        # Lifetime counters: NOT reset by update_guidance(), so control
+        # overhead is charged for every refresh window of a run.
+        self.reset_lifetime_stats()
 
     # ------------------------------------------------------------------ #
     #  Internal: run multi-source Dijkstra once per capability            #
@@ -67,6 +70,7 @@ class GlobalCoordinator:
             self._dijkstra_cache[capability] = ({}, {})
             return {}, {}
 
+        self.lifetime_dijkstra_runs += 1
         weight = effective_edge_weight(self.agents)
         try:
             distances, paths = nx.multi_source_dijkstra(
@@ -86,9 +90,11 @@ class GlobalCoordinator:
         key = (node, capability)
         if key in self._guidance_cache:
             self._cache_hits += 1
+            self.lifetime_hits += 1
             return
 
         self._cache_misses += 1
+        self.lifetime_misses += 1
         distances, paths = self._run_dijkstra(capability)
 
         if getattr(self.agents[node], "failed", False) or node not in distances:
@@ -135,14 +141,23 @@ class GlobalCoordinator:
     #  Overhead measurement                                                #
     # ------------------------------------------------------------------ #
 
+    def reset_lifetime_stats(self):
+        self.lifetime_dijkstra_runs = 0
+        self.lifetime_misses        = 0
+        self.lifetime_hits          = 0
+
     def overhead_stats(self) -> Dict:
-        """Return cache hit/miss stats for overhead reporting."""
+        """Cache statistics. `cache_*` cover the current refresh window only;
+        `lifetime_*` cover everything since reset_lifetime_stats()."""
         total = self._cache_hits + self._cache_misses
         return {
             "cache_hits":   self._cache_hits,
             "cache_misses": self._cache_misses,
             "total_lookups": total,
             "hit_rate": self._cache_hits / max(1, total),
+            "lifetime_dijkstra_runs": self.lifetime_dijkstra_runs,
+            "lifetime_misses":        self.lifetime_misses,
+            "lifetime_hits":          self.lifetime_hits,
         }
 
     # ------------------------------------------------------------------ #

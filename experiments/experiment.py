@@ -40,7 +40,9 @@ from core.routers import (
     TOPSISRouter,
     HybridXAIRouter,
 )
-from core.metrics import evaluate_route
+from core.learned_routers import DRLORSRouter, AgentNetStyleRouter
+from core.metrics import evaluate_route, set_jitter_seed
+from core.dynamics import LoadDynamics
 
 logger = logging.getLogger("experiment")
 
@@ -135,22 +137,17 @@ def _coordinator_overhead_per_task(
     """
     MEASURED amortised control cost of the lazy global coordinator.
 
-    The coordinator computes guidance ON DEMAND and caches it until the next
-    refresh. Charging the full |V| x |C| cross-product (as an eager coordinator
-    would cost) overstates the real cost by ~40x, because most (node, capability)
-    pairs are never queried.
+    Every time guidance for a capability is (re)computed after a refresh,
+    the coordinator runs one multi-source Dijkstra and disseminates the result:
+    one state-advertisement message per node, i.e. |V| messages. Lookups
+    answered from the cache in the same refresh window cost nothing.
 
-    We therefore charge the MEASURED number of cache misses: each miss triggers
-    one multi-source Dijkstra whose result is one state-advertisement message
-    per node reached. Cache hits cost nothing.
-
-    Call AFTER routing so coordinator.overhead_stats() reflects real usage.
+    Uses the coordinator's LIFETIME counters, so every refresh window of the
+    run is charged (the per-window counters are reset by update_guidance()).
+    Call AFTER routing, having called reset_lifetime_stats() before it.
     """
-    stats = coordinator.overhead_stats()
-    misses = stats.get("cache_misses", 0)
-    # Each miss disseminates guidance to the nodes that need it (one msg/node)
-    total_msgs = misses * len(G.nodes())
-    return total_msgs / max(1, num_tasks)
+    runs = coordinator.overhead_stats()["lifetime_dijkstra_runs"]
+    return runs * len(G.nodes()) / max(1, num_tasks)
 
 
 # ================================================================== #
@@ -174,6 +171,7 @@ class GloXRouteExperiment:
         # Seeding
         random.seed(seed)
         np.random.seed(seed)
+        set_jitter_seed(seed)
 
         # Network
         logger.info("Building network (topology=%s, n=%d, seed=%d)",
@@ -197,6 +195,9 @@ class GloXRouteExperiment:
         # "seed + generator code".
         _snapshot_network_and_tasks(self.G, self.agents, self.test_tasks, self.run_dir)
 
+        # Time-varying loads (no-op unless DYNAMIC_LOADS is enabled)
+        self.dynamics = LoadDynamics(self.agents, seed=seed)
+
         # Coordinator
         t0 = time.perf_counter()
         self.coordinator = GlobalCoordinator(self.G, self.agents)
@@ -216,8 +217,12 @@ class GloXRouteExperiment:
             # isolating the contribution of global coordination.
             SAWRouter(),
             TOPSISRouter(),
+            # Recent CCF-A learned baselines (see core/learned_routers.py)
+            DRLORSRouter(topology=topology, num_agents=num_agents, eval_seed=seed),
+            AgentNetStyleRouter(eval_seed=seed),
             HybridXAIRouter(self.coordinator, router_name="HybridXAI_HeuristicCoord"),
         ]
+        self.training_cost: Dict[str, dict] = {}
 
     # -------------------------------------------------------------- #
     def run(self) -> pd.DataFrame:
@@ -226,26 +231,44 @@ class GloXRouteExperiment:
         for router in self.routers:
             logger.info("  Running %s ...", router.name)
             update_counter = 0
+            router_start = len(all_rows)
 
-            # Reset coordinator counters so overhead is measured per-router
+            # Every router sees the same initial state and load trajectory.
+            self.dynamics.reset()
+            self.coordinator.update_guidance()
+            self.coordinator.reset_lifetime_stats()
+            if hasattr(router, "refresh_state"):
+                router.refresh_state()
+
+            # Learned baselines train / warm up here; this cost is reported
+            # separately (training_cost.json) and never counted as decision time.
+            if hasattr(router, "prepare"):
+                router.prepare(self.G, self.agents)
+                self.training_cost[router.name] = dict(router.train_stats)
+                logger.info("    %s preparation: %s", router.name, router.train_stats)
+
             if "HybridXAI" in router.name:
-                self.coordinator.update_guidance()
                 router_rows_start = len(all_rows)
 
             for task in self.test_tasks:
                 update_counter += 1
                 if update_counter % COORDINATOR_UPDATE_INTERVAL == 0:
-                    if hasattr(self.coordinator, "update_guidance"):
-                        self.coordinator.update_guidance()
+                    # global state refresh: GloXRoute's coordinator and any
+                    # other router holding global state refresh together
+                    self.coordinator.update_guidance()
+                    if hasattr(router, "refresh_state"):
+                        router.refresh_state()
 
                 t0   = time.perf_counter()
                 dec  = router.route(self.G, self.agents, task)
                 dt   = time.perf_counter() - t0
 
+                # online learning (AgentNet-style) happens outside the timed decision
+                if hasattr(router, "feedback"):
+                    router.feedback(self.G, self.agents, task, dec.path)
+
                 # Overhead: HybridXAI gets its coordinator cost added
                 extra = dec.extra_overhead
-                if "HybridXAI" in router.name:
-                    extra += self.coord_overhead_per_task
 
                 row = evaluate_route(
                     G            = self.G,
@@ -259,22 +282,42 @@ class GloXRouteExperiment:
                 )
                 all_rows.append(row)
 
+                # loads evolve before the next task (dynamic scenario only)
+                self.dynamics.step()
+
             # After this router finishes, retro-charge measured coordinator cost
             if "HybridXAI" in router.name:
                 measured = _coordinator_overhead_per_task(
                     self.G, self.coordinator, len(self.test_tasks)
                 )
-                self.coord_overhead_per_task = measured
                 logger.info("    Measured coordinator overhead: %.3f msgs/task", measured)
                 for r in all_rows[router_rows_start:]:
                     r["communication_overhead"] += measured
+
+            # Any other router that disseminates global state (e.g. DRL-OR-S's
+            # link-state table) is charged that traffic amortised over the tasks.
+            ctrl = float(getattr(router, "control_messages_total", 0.0))
+            if ctrl > 0:
+                per_task = ctrl / max(1, len(self.test_tasks))
+                logger.info("    %s control overhead: %.3f msgs/task", router.name, per_task)
+                for r in all_rows[router_start:]:
+                    r["communication_overhead"] += per_task
 
         df = pd.DataFrame(all_rows)
         csv_path = os.path.join(self.run_dir, "all_results.csv")
         df.to_csv(csv_path, index=False)
         logger.info("Raw results saved to %s", csv_path)
 
+        with open(os.path.join(self.run_dir, "training_cost.json"), "w") as f:
+            json.dump(self.training_cost, f, indent=2, default=float)
+
         summary = self._summarise(df)
+        # cost of producing the policy that was evaluated (same value for
+        # every seed when a transfer-trained policy is reused)
+        summary["train_time_s"] = [
+            float(self.training_cost.get(m, {}).get("train_time_s", 0.0))
+            for m in summary.index
+        ]
         sum_path = os.path.join(self.run_dir, "summary.csv")
         summary.to_csv(sum_path)
         logger.info("Summary:\n%s", summary.to_string())
@@ -294,7 +337,8 @@ class GloXRouteExperiment:
             avg_latency           = ("latency", "mean"),
             median_latency        = ("latency", "median"),
             p95_latency           = ("latency", lambda x: np.percentile(x, 95)),
-            avg_effective_latency = ("effective_latency",
+            avg_realised_latency  = ("realised_latency", "mean"),
+        avg_effective_latency = ("effective_latency",
                                      lambda x: x.replace([np.inf,-np.inf], np.nan).dropna().mean()),
             p95_effective_latency = ("effective_latency",
                                      lambda x: np.percentile(
@@ -373,14 +417,17 @@ class GloXRouteExperiment:
         # - Stretch: path optimality vs raw shortest (10%)
         # Raw avg_latency is NOT included because ShortestPath minimises it
         # by construction — it belongs in the per-metric table, not composite.
+        # Control overhead is NOT part of the composite: methods obtain global
+        # state in different ways (fresh per task, periodic coordinator,
+        # link-state table), so it is reported as its own metric
+        # (avg_overhead). Remaining weights keep their original ratios.
         agg["routing_score"] = (
             0.20 * agg["eff_latency_score"]
             + 0.20 * agg["deadline_score"]
             + 0.20 * agg["protocol_score"]
-            + 0.15 * agg["overhead_score"]
             + 0.15 * agg["hop_score"]
             + 0.10 * agg["stretch_score"]
-        )
+        ) / 0.85
 
         # Explainability score — reported separately, never added to routing_score
         agg["explainability_score"] = agg["explanation_rate"]

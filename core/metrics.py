@@ -4,7 +4,7 @@ import math
 import networkx as nx
 
 from core.models import Agent, Task
-from core.utils import path_effective_latency, shortest_capability_latency
+from core.utils import path_effective_latency, shortest_capability_latency, effective_edge_weight
 
 
 @dataclass
@@ -125,6 +125,61 @@ def _explanation_length(explanation: Optional[str]) -> int:
     return len(str(explanation).split())
 
 
+# ------------------------------------------------------------------ #
+#  Stochastic delivery delay (common random numbers)                   #
+# ------------------------------------------------------------------ #
+_JITTER_SEED = 0
+
+
+def set_jitter_seed(seed: int) -> None:
+    """Called once per seed by every experiment runner."""
+    global _JITTER_SEED
+    _JITTER_SEED = int(seed)
+
+
+def _splitmix64(x: int) -> int:
+    x = (x + 0x9E3779B97F4A7C15) & 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & 0xFFFFFFFFFFFFFFFF
+    x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & 0xFFFFFFFFFFFFFFFF
+    return x ^ (x >> 31)
+
+
+def _uniform(*keys) -> float:
+    h = 0
+    for k in keys:
+        h = _splitmix64(h ^ (int(k) & 0xFFFFFFFFFFFFFFFF))
+    return ((h >> 11) + 0.5) / float(1 << 53)          # in (0, 1)
+
+
+def jitter_factor(task_id: int, hop: int, u: int, v: int) -> float:
+    """Mean-1 log-normal delay factor for traversing (u, v) as hop `hop` of
+    task `task_id`. Identical for every method taking that hop."""
+    from core.config import DELAY_JITTER_CV as cv
+    if cv <= 0:
+        return 1.0
+    u1 = _uniform(_JITTER_SEED, task_id, hop, u, v, 1)
+    u2 = _uniform(_JITTER_SEED, task_id, hop, u, v, 2)
+    z = math.sqrt(-2.0 * math.log(u1)) * math.cos(2.0 * math.pi * u2)
+    s2 = math.log(1.0 + cv * cv)
+    return math.exp(-0.5 * s2 + math.sqrt(s2) * z)
+
+
+def realised_latency(G, agents, task, path) -> float:
+    """Actual delivery delay of a route: expected hop costs x jitter."""
+    if path is None or len(path) <= 1:
+        return 0.0
+    w = effective_edge_weight(agents)
+    total = 0.0
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
+        if not G.has_edge(u, v):
+            return float("inf")
+        c = w(u, v, G[u][v])
+        if c is None:
+            return float("inf")
+        total += float(c) * jitter_factor(task.task_id, i, u, v)
+    return total
+
+
 def evaluate_route(
     G: nx.Graph,
     agents: Dict[int, Agent],
@@ -176,14 +231,16 @@ def evaluate_route(
 
     communication_overhead = hops + float(extra_overhead)
 
-    # Deadline miss: effective latency exceeds (deadline_factor x best achievable)
+    # Deadline miss: the REALISED delay (with delivery jitter) exceeds
+    # deadline_factor x best achievable EXPECTED latency.
     best_effective = shortest_capability_latency(G, agents, task)
-    if math.isinf(best_effective) or math.isinf(effective_latency):
+    realised = realised_latency(G, agents, task, path)
+    if math.isinf(best_effective) or math.isinf(realised):
         deadline_miss = True
     elif best_effective <= 0.0:
         deadline_miss = False
     else:
-        deadline_miss = effective_latency > (float(task.deadline) * best_effective)
+        deadline_miss = realised > (float(task.deadline) * best_effective)
 
     result = RouteResult(
         method=method_name,
@@ -210,5 +267,6 @@ def evaluate_route(
     row = result.__dict__
     row["decision_time_ms"] = decision_time * 1000.0
     row["effective_latency"] = effective_latency
+    row["realised_latency"]  = realised
 
     return row

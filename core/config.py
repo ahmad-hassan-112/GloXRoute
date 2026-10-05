@@ -36,7 +36,12 @@ import os as _os
 # sets to a timestamped folder (outputs/runs/<YYYY-MM-DD_HH-MM-SS>) so
 # every `make all_modes` run is kept separately and never overwrites
 # a previous run's results.
-OUTPUT_DIR = _os.environ.get("GLOXROUTE_RUN_DIR", "outputs")
+import time as _time
+# Direct runs (python3 main.py ...) also get a timestamped folder.
+OUTPUT_DIR = _os.environ.get(
+    "GLOXROUTE_RUN_DIR",
+    _os.path.join("outputs", _time.strftime("%Y-%m-%d_%H-%M-%S")),
+)
 
 # ------------------------------------------------------------------
 # Capabilities  — kept sparse so routing is non-trivial
@@ -125,3 +130,42 @@ LATENCY_BOUND_EPSILON = 0.15
 # study and scoring function actually get evaluated on >1 option per hop.
 TIE_BREAK_TOP_K = 3
 ROUTE_CACHE_MAXSIZE   = 8192
+
+# ------------------------------------------------------------------
+# Recent CCF-A learned baselines (core/learned_routers.py)
+# ------------------------------------------------------------------
+# DRL-OR-S (TPDS 2023).  "transfer": train once per configuration on
+# DRLOR_TRAIN_GRAPHS graphs whose seeds are disjoint from SEEDS, then
+# evaluate the frozen policy on every evaluation seed (no test leakage).
+# "same_graph": train on each evaluation graph with a separate task stream.
+DRLOR_TRAIN_MODE        = "transfer"
+DRLOR_TRAIN_EPISODES    = 6000
+DRLOR_TRAIN_GRAPHS      = 5
+DRLOR_TRAIN_SEED_OFFSET = 900_000
+DRLOR_HIDDEN            = 32
+DRLOR_LR                = 3e-3
+DRLOR_ENTROPY           = 0.01
+DRLOR_BATCH             = 16
+
+# AgentNet (NeurIPS 2025).  Warm-up tasks served on the evaluation graph
+# before measurement (random stream, separate RNG); learning continues online.
+AGENTNET_WARMUP_TASKS    = 3000
+AGENTNET_MEMORY_SIZE     = 64      # records per agent
+AGENTNET_PRUNE_THRESHOLD = 0.25    # link weight below which a link is pruned
+
+# ------------------------------------------------------------------
+# Dynamic load scenario (core/dynamics.py) — enabled with main.py --dynamic
+# ------------------------------------------------------------------
+DYNAMIC_LOADS = False
+LOAD_THETA    = 0.10     # mean reversion per task
+LOAD_SIGMA    = 0.08     # per-task noise (stationary SD ~ 0.18)
+
+# ------------------------------------------------------------------
+# Stochastic delivery delay (always on; core/metrics.py)
+# ------------------------------------------------------------------
+# Each hop's realised delay = expected effective cost x a mean-1 log-normal
+# factor with this coefficient of variation. Routers plan with expected
+# values; deadline_miss is judged on the realised delay. Factors are drawn
+# from common random numbers keyed on (seed, task, hop), so every method
+# faces identical jitter on identical hops. 0.0 disables jitter.
+DELAY_JITTER_CV = 0.20

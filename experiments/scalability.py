@@ -43,7 +43,7 @@ from core.routers import (
     HybridXAIRouter,
 )
 
-from core.metrics import evaluate_route
+from core.metrics import evaluate_route, set_jitter_seed
 
 
 logging.basicConfig(
@@ -85,6 +85,7 @@ def run_scale(
 
     random.seed(seed)
     np.random.seed(seed)
+    set_jitter_seed(seed)
 
 
     G, agents = build_ioa_network(

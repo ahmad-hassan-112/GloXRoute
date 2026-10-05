@@ -433,80 +433,74 @@ class HybridXAIRouter(BaseRouter):
     GloXRoute — Proposed Method.
 
     At each hop:
-      1. Obtain global coordinator guidance (lazy, cached).
-      2. Filter candidates to those within LATENCY_BOUND_EPSILON of
-         the lowest-cost option (so routing stays near-optimal on latency).
-      3. Among near-optimal candidates, score by multi-attribute glass-box
-         function including capability, reliability, load, resource,
-         protocol compatibility, and global hint.
+      1. Obtain global coordinator guidance (lazy, cached per refresh window).
+      2. Feasibility:
+           deadline_aware=True  — keep only candidates through which the task
+             can still meet its deadline:  spent + step + remaining <= budget,
+             budget = deadline_factor x best achievable effective latency.
+           deadline_aware=False — original fixed window: candidates within
+             LATENCY_BOUND_EPSILON of the cheapest, topped up to TIE_BREAK_TOP_K.
+      3. Among feasible candidates, pick the highest linear glass-box score
+         (SCORE_WEIGHTS . features).
       4. Emit a human-readable explanation for every decision.
 
-    Overhead: proportional to routing decisions made (lazy coordinator),
-    not to full (node × capability) cross-product.
+    The use_* switches exist for the ablation study; experiments/ablation.py
+    and experiments/xai_eval.py use THIS class, so all three evaluate the
+    same router. record_trace=True stores every hop's candidate table.
     """
     name = "HybridXAI"
 
-    def __init__(self, coordinator: GlobalCoordinator, router_name: str = "HybridXAI_HeuristicCoord"):
-        self.coordinator  = coordinator
-        self.route_cache  = RouteCache(maxsize=ROUTE_CACHE_MAXSIZE)
-        self.name         = router_name
-        self._fallback_dist_cache = {}
+    SCORE_WEIGHTS = {
+        "cap_match": 3.0, "rec_match": 2.0, "hint": 2.0, "reliability": 1.5,
+        "resource": 0.5, "load": -1.0, "congestion": -0.5, "proto_match": 1.0,
+        "dead_end": -0.5,
+        # relative cost advantage over the cheapest candidate (0 for the
+        # cheapest, negative otherwise); weight calibrated on training graphs
+        # only (experiments/calibrate.py), never on evaluation seeds
+        "cost_advantage": 50.0,
+    }
+
+    def __init__(self, coordinator: GlobalCoordinator, router_name: str = "HybridXAI_HeuristicCoord",
+                 deadline_aware: bool = True, use_global: bool = True,
+                 use_capability: bool = True, use_load: bool = True,
+                 use_reliability: bool = True, use_protocol: bool = True,
+                 use_cost: bool = True, record_trace: bool = False):
+        self.coordinator     = coordinator
+        self.name            = router_name
+        self.deadline_aware  = deadline_aware
+        self.use_global      = use_global
+        self.use_capability  = use_capability
+        self.use_load        = use_load
+        self.use_reliability = use_reliability
+        self.use_protocol    = use_protocol
+        self.record_trace    = record_trace
+        if not use_cost:
+            self.SCORE_WEIGHTS = dict(self.SCORE_WEIGHTS, cost_advantage=0.0)
+        self.trace: list     = []
+        self.route_cache     = RouteCache(maxsize=ROUTE_CACHE_MAXSIZE)
 
     # -------------------------------------------------------------- #
-    def _distance_to_capable_norm(self, G, agents, candidate, required) -> float:
-        """
-        Fallback: distance to nearest capable agent, normalised.
-        CACHED per (candidate, required) within a single routing call to avoid
-        O(candidates) redundant shortest-path searches per hop, which was the
-        main scalability bottleneck at large node counts (500+).
-        """
-        cache_key = (candidate, required)
-        if cache_key in self._fallback_dist_cache:
-            return self._fallback_dist_cache[cache_key]
-
-        # Single multi-source Dijkstra from all capable (non-failed) targets,
-        # instead of one shortest_path_length call per target per candidate.
-        targets = [
-            t for t in capable_nodes(agents, required)
-            if not getattr(agents[t], "failed", False)
-        ]
-        if not targets:
-            self._fallback_dist_cache[cache_key] = 1.0
-            return 1.0
-
-        try:
-            distances = nx.multi_source_dijkstra_path_length(
-                G, sources=set(targets), weight="latency"
-            )
-            best = distances.get(candidate, float("inf"))
-        except Exception:
-            best = float("inf")
-
-        result = 1.0 if math.isinf(best) else best / (10.0 * max(1, len(G.nodes())))
-        self._fallback_dist_cache[cache_key] = result
-        return result
+    def tie_score(self, r) -> float:
+        return sum(w * r[f] for f, w in self.SCORE_WEIGHTS.items())
 
     def _fallback_hop(self, G, agents, current, required, visited):
-        """If no scored candidate passes filters, fall back to Dijkstra."""
-        rec = self.coordinator.next_hop[current][required]
-        if rec is not None and rec not in visited:
-            return rec, "fallback=coordinator_next_hop"
-
+        """No scored candidate: follow the coordinator, else local Dijkstra."""
+        if self.use_global:
+            rec = self.coordinator.next_hop[current][required]
+            if rec is not None and rec not in visited:
+                return rec, "fallback=coordinator_next_hop"
         best_path, best_cost = None, float("inf")
+        weight_fn = effective_edge_weight(agents)
         for target in capable_nodes(agents, required):
             try:
-                path = nx.shortest_path(G, current, target, weight="latency")
-                if len(path) <= 1:
+                path = nx.shortest_path(G, current, target, weight=weight_fn)
+                if len(path) <= 1 or path[1] in visited:
                     continue
-                cost = nx.shortest_path_length(G, current, target, weight="latency")
-                nh   = path[1]
-                if nh in visited:
-                    continue
+                cost = path_latency(G, agents, path)
                 if cost < best_cost:
                     best_cost, best_path = cost, path
             except nx.NetworkXNoPath:
                 continue
-
         if best_path:
             return best_path[1], "fallback=dijkstra"
         return None, "fallback=none"
@@ -516,156 +510,130 @@ class HybridXAIRouter(BaseRouter):
         if source_can_solve(agents, task):
             return RouteDecision(path=[task.source], explanation="", extra_overhead=0.0)
 
-        self._fallback_dist_cache.clear()
-
+        current, required = task.source, task.required_capability
         cache_key = (
-            int(task.source),
-            str(task.required_capability),
+            int(task.source), str(required),
             int(getattr(self.coordinator, "state_version", 0)),
+            round(float(task.deadline), 3) if self.deadline_aware else None,
         )
-        cached = self.route_cache.get(cache_key)
-        if cached is not None:
-            return RouteDecision(
-                path=cached,
-                explanation="Cached GloXRoute route reused.",
-                extra_overhead=0.0,
-            )
+        if not self.record_trace:
+            cached = self.route_cache.get(cache_key)
+            if cached is not None:
+                return RouteDecision(path=cached,
+                                     explanation="Cached GloXRoute route reused.",
+                                     extra_overhead=0.0)
 
-        current, required  = task.source, task.required_capability
-        path, visited      = [current], {current}
-        explanations       = []
-        weight_fn          = effective_edge_weight(agents)
+        path, visited = [current], {current}
+        explanations  = []
+        weight_fn     = effective_edge_weight(agents)
+
+        # Deadline budget (needs the coordinator's distance estimate).
+        d0 = self.coordinator.distance[current][required] if self.use_global else float("inf")
+        use_budget = self.deadline_aware and self.use_global and not math.isinf(d0)
+        budget = float(task.deadline) * d0 if use_budget else float("inf")
+        spent  = 0.0
 
         for _ in range(MAX_HOPS):
             if required in agents[current].capabilities:
                 break
-
-            candidates = [n for n in G.neighbors(current) if n not in visited and not getattr(agents[n], 'failed', False)]
+            candidates = [n for n in G.neighbors(current)
+                          if n not in visited and not getattr(agents[n], "failed", False)]
             if not candidates:
                 break
 
-            rec_next = self.coordinator.next_hop[current][required]
-            coord_ctx = self.coordinator.explain_guidance(current, required)
+            rec_next  = self.coordinator.next_hop[current][required] if self.use_global else None
+            coord_ctx = self.coordinator.explain_guidance(current, required) if self.use_global else "global=off"
 
             rows = []
             for n in candidates:
-                edge      = G[current][n]
-                step_cost = weight_fn(current, n, edge)
+                step_cost = weight_fn(current, n, G[current][n])
                 if step_cost is None:
                     continue
-
-                dist_val = self.coordinator.distance[n][required]
+                dist_val = self.coordinator.distance[n][required] if self.use_global else float("inf")
                 if math.isinf(dist_val):
-                    dist_norm  = self._distance_to_capable_norm(G, agents, n, required)
-                    remaining  = dist_norm * 10.0
+                    if self.use_global:
+                        continue                       # capability unreachable through n
+                    remaining, dist_norm = 5.0, 0.5    # neutral value when coordinator is off
                 else:
-                    dist_norm = min(dist_val / 20.0, 1.0)
-                    remaining = dist_val
+                    remaining, dist_norm = dist_val, min(dist_val / 20.0, 1.0)
 
-                if math.isinf(remaining):
-                    continue
+                cap = 1.0 if required in agents[n].capabilities else 0.0
+                onward = sum(1 for nn in G.neighbors(n) if nn not in visited and nn != current)
+                r = {
+                    "node":        n,
+                    "step_cost":   step_cost,
+                    "remaining":   remaining,
+                    "total_cost":  step_cost + remaining,
+                    "dist_norm":   dist_norm,
+                    "latency":     G[current][n]["latency"],
+                    "cap_match":   cap if self.use_capability else 0.0,
+                    "rec_match":   (1.0 if n == rec_next else 0.0) if self.use_global else 0.0,
+                    "hint":        self.coordinator.guidance[n][required] if self.use_global else 0.0,
+                    "reliability": agents[n].reliability if self.use_reliability else 0.5,
+                    "resource":    agents[n].resource,
+                    "load":        agents[n].load if self.use_load else 0.0,
+                    "congestion":  agents[n].load if self.use_load else 0.0,
+                    "proto_match": (1.0 if agents[current].protocol == agents[n].protocol else 0.0)
+                                   if self.use_protocol else 0.0,
+                    "dead_end":    1.0 if onward == 0 and cap == 0.0 else 0.0,
+                }
+                rows.append(r)
 
-                cap_match   = 1.0 if required in agents[n].capabilities else 0.0
-                rec_match   = 1.0 if n == rec_next else 0.0
-                hint        = self.coordinator.guidance[n][required]
-                reliability = agents[n].reliability
-                resource    = agents[n].resource
-                load        = agents[n].load
-                latency     = edge["latency"]
-                congestion  = agents[n].load   # congestion proxy
-
-                # ---- Protocol compatibility term (NEW) ----
-                # Rewards protocol-compatible neighbours to reduce mismatch rate
-                proto_match = 1.0 if agents[current].protocol == agents[n].protocol else 0.0
-
-                onward = sum(
-                    1 for nn in G.neighbors(n)
-                    if nn not in visited and nn != current
-                )
-                dead_end = 1.0 if onward == 0 and cap_match == 0.0 else 0.0
-
-                rows.append({
-                    "node": n,
-                    "total_cost":         step_cost + remaining,
-                    "cap_match":          cap_match,
-                    "rec_match":          rec_match,
-                    "hint":               hint,
-                    "reliability":        reliability,
-                    "resource":           resource,
-                    "load":               load,
-                    "latency":            latency,
-                    "congestion":         congestion,
-                    "proto_match":        proto_match,
-                    "dist_norm":          dist_norm,
-                    "dead_end":           dead_end,
-                    "step_cost":          step_cost,
-                    "remaining":          remaining,
-                })
-
-            if not rows:
-                fb, reason = self._fallback_hop(G, agents, current, required, visited)
-                if fb is None:
-                    break
-                best_n = fb
-                expl   = (
-                    f"from={current}->to={best_n}; {reason}; "
-                    f"coordinator_context=({coord_ctx})"
-                )
-            else:
+            if rows:
                 best_total = min(r["total_cost"] for r in rows)
-                bound      = best_total * (1.0 + LATENCY_BOUND_EPSILON)
-                feasible   = [r for r in rows if r["total_cost"] <= bound]
-                if len(feasible) < TIE_BREAK_TOP_K:
-                    feasible = sorted(rows, key=lambda r: r["total_cost"])[:TIE_BREAK_TOP_K]
+                for r in rows:
+                    r["cost_advantage"] = (best_total - r["total_cost"]) / max(best_total, 1e-9)
+                    r["tie_score"] = self.tie_score(r)
 
-                for r in feasible:
-                    r["tie_score"] = (
-                        3.0  * r["cap_match"]
-                        + 2.0  * r["rec_match"]
-                        + 2.0  * r["hint"]
-                        + 1.5  * r["reliability"]
-                        + 0.5  * r["resource"]
-                        - 1.0  * r["load"]
-                        - 0.5  * r["congestion"]
-                        + 1.0  * r["proto_match"]      # protocol compatibility bonus
-                        - 0.5  * r["dead_end"]
-                    )
+            feasible, w = [], None
+            if not rows:
+                best_n, reason = self._fallback_hop(G, agents, current, required, visited)
+                if best_n is None:
+                    break
+                expl = f"from={current}->to={best_n}; {reason}; coordinator_context=({coord_ctx})"
+            else:
+                if use_budget:
+                    for r in rows:
+                        r["budget_left"] = budget - spent - r["total_cost"]
+                    feasible = [r for r in rows if r["budget_left"] >= -1e-9]
+                    if not feasible:           # budget already broken: cheapest way out
+                        feasible = [min(rows, key=lambda r: r["total_cost"])]
+                else:
+                    best_total = min(r["total_cost"] for r in rows)
+                    bound      = best_total * (1.0 + LATENCY_BOUND_EPSILON)
+                    feasible   = [r for r in rows if r["total_cost"] <= bound]
+                    if len(feasible) < TIE_BREAK_TOP_K:
+                        feasible = sorted(rows, key=lambda r: r["total_cost"])[:TIE_BREAK_TOP_K]
 
                 w      = max(feasible, key=lambda r: r["tie_score"])
                 best_n = w["node"]
-
                 expl = (
                     f"from={current}->to={best_n}; "
                     f"coordinator_context=({coord_ctx}); "
-                    f"cap_match={w['cap_match']}; "
-                    f"recommended_by_global={w['rec_match']}; "
-                    f"global_guidance={w['hint']:.3f}; "
-                    f"reliability={w['reliability']:.3f}; "
-                    f"resource={w['resource']:.3f}; "
-                    f"load={w['load']:.3f}; "
-                    f"latency={w['latency']:.3f}; "
-                    f"proto_match={w['proto_match']}; "
-                    f"dist_to_required_norm={w['dist_norm']:.3f}; "
-                    f"dead_end_penalty={w['dead_end']}; "
-                    f"tie_score={w['tie_score']:.3f}"
+                    + "; ".join(f"{f}={w[f]:.5f}" for f in self.SCORE_WEIGHTS)
+                    + f"; tie_score={w['tie_score']:.5f}"
+                    + f"; feasible_candidates={len(feasible)}/{len(rows)}"
+                    + (f"; deadline_budget_left={w['budget_left']:.3f}" if use_budget else "")
                 )
 
+            if self.record_trace:
+                self.trace.append({
+                    "task_id": task.task_id, "current": current, "chosen": best_n,
+                    "rows": rows, "feasible": [r["node"] for r in feasible],
+                    "explanation": expl,
+                })
+
+            c_step = weight_fn(current, best_n, G[current][best_n])
+            spent += float(c_step) if c_step is not None else float("inf")
             current = best_n
             path.append(current)
             visited.add(current)
             explanations.append(expl)
 
-            if required in agents[current].capabilities:
-                break
-
-        if path and required in agents[path[-1]].capabilities:
+        if path and required in agents[path[-1]].capabilities and not self.record_trace:
             self.route_cache.put(cache_key, path)
 
-        return RouteDecision(
-            path=path,
-            explanation=" | ".join(explanations),
-            extra_overhead=0.1,
-        )
+        return RouteDecision(path=path, explanation=" | ".join(explanations), extra_overhead=0.1)
 
 
 # ================================================================== #

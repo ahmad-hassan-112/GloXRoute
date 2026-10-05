@@ -43,6 +43,8 @@ def _parse():
                    help="Enable congestion scenario (30 %% hot agents)")
     p.add_argument("--failure_rate", type=float, default=None,
                    help="Fraction of agents that fail (0.0–1.0)")
+    p.add_argument("--dynamic",      action="store_true",
+                   help="Time-varying agent loads; global state refreshed periodically")
     p.add_argument("--out_dir",      default=None)
     return p.parse_args()
 
@@ -60,18 +62,20 @@ def main():
     if args.congestion:    cfg.CONGESTION_SCENARIO = True
     if args.failure_rate is not None:
         cfg.FAILURE_RATE = args.failure_rate
+    if args.dynamic:       cfg.DYNAMIC_LOADS      = True
 
     tag_parts = [cfg.TOPOLOGY]
     if cfg.CONGESTION_SCENARIO: tag_parts.append("congestion")
     if cfg.FAILURE_RATE > 0:    tag_parts.append(f"fail{cfg.FAILURE_RATE:.2f}")
+    if cfg.DYNAMIC_LOADS:       tag_parts.append("dynamic")
     tag = "_".join(tag_parts)
 
     out_dir = args.out_dir or os.path.join(cfg.OUTPUT_DIR, tag)
 
     if args.multiseed:
         from experiments.experiment import run_multiseed
-        logger.info("Multi-seed experiment: topology=%s, n=%d, tasks_per_seed=%d",
-                    cfg.TOPOLOGY, cfg.NUM_AGENTS, cfg.NUM_TASKS)
+        logger.info("Multi-seed experiment: topology=%s, n=%d, task_mode=%s",
+                    cfg.TOPOLOGY, cfg.NUM_AGENTS, cfg.TASK_MODE)
         run_multiseed(
             seeds      = cfg.SEEDS,
             topology   = cfg.TOPOLOGY,

@@ -46,11 +46,14 @@ COLORS = {
     'TOPSIS':       '#6A0DAD',
     'BiRouter':     '#E65100',
     'Greedy':       '#4A4A4A',
+    'DRL-OR-S':     '#00897B',
+    'AgentNet':     '#AD1457',
 }
-METHOD_ORDER = ['GloXRoute','ShortestPath','Centralized','SAW','TOPSIS','BiRouter','Greedy']
+METHOD_ORDER = ['GloXRoute','DRL-OR-S','AgentNet','BiRouter','ShortestPath','Centralized','SAW','TOPSIS','Greedy']
 METHOD_MAP = {
     'HybridXAI_HeuristicCoord':'GloXRoute','SAW_MADM':'SAW','TOPSIS_MADM':'TOPSIS',
     'DecentralizedGreedy':'Greedy','BiRouterStyle':'BiRouter',
+    'DRLOR_S':'DRL-OR-S','AgentNetStyle':'AgentNet',
 }
 TOPO_ORDER = ['BA','WS','ER']
 COND_ORDER = ['normal','congestion','failure']
@@ -275,7 +278,7 @@ def fig4_routing_score(all_df, out_dir):
 
     ax.legend(
         handles=handles,
-        ncol=min(7, len(METHOD_ORDER)),
+        ncol=min(9, len(METHOD_ORDER)),
         fontsize=8,
         loc='upper right',
         framealpha=0.9,
@@ -329,7 +332,7 @@ def fig5_eff_latency(all_df, out_dir):
     ax.set_xticklabels([f'{t}\n{c}' for t,c in configs], fontsize=9)
     ax.set_ylabel('effective latency'); ax.set_xlim(-0.5, len(configs)-0.5)
     for i in [2.5, 5.5]: ax.axvline(i, color='0.6', lw=0.8, linestyle=':')
-    ax.legend(handles=handles, ncol=7, fontsize=8, loc='upper left',
+    ax.legend(handles=handles, ncol=9, fontsize=8, loc='upper left',
               framealpha=0.9, edgecolor='0.8')
     fig.tight_layout()
     save(fig, str(Path(out_dir)/'fig5_eff_latency.pdf'))
@@ -340,20 +343,21 @@ def fig5_eff_latency(all_df, out_dir):
 # ══════════════════════════════════════════════════════════════════════════════
 def fig6_deadline_protocol(all_df, out_dir):
     # aggregate across all configs (pooled mean per method)
-    dl = all_df.groupby('method')['deadline_miss_rate'].mean()[METHOD_ORDER]
-    pm = all_df.groupby('method')['protocol_mismatch_rate'].mean()[METHOD_ORDER]
+    order = [m for m in METHOD_ORDER if m in set(all_df['method'])]
+    dl = all_df.groupby('method')['deadline_miss_rate'].mean()[order]
+    pm = all_df.groupby('method')['protocol_mismatch_rate'].mean()[order]
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     for ax, data, ylabel, title in [
         (axes[0], dl, 'fraction of tasks', 'Deadline miss rate'),
         (axes[1], pm, 'fraction of hops',  'Protocol mismatch rate'),
     ]:
-        bar_colors = [COLORS[m] for m in METHOD_ORDER]
-        bars = ax.bar(METHOD_ORDER, data.values, color=bar_colors, edgecolor='white', zorder=3)
+        bar_colors = [COLORS[m] for m in order]
+        bars = ax.bar(order, data.values, color=bar_colors, edgecolor='white', zorder=3)
         for bar, val in zip(bars, data.values):
             ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.005,
                     f'{val:.3f}', ha='center', va='bottom', fontsize=9)
         ax.set_ylabel(ylabel); ax.set_title(title, fontweight='bold')
-        ax.set_xticklabels(METHOD_ORDER, rotation=20, ha='right', fontsize=9)
+        ax.set_xticklabels(order, rotation=20, ha='right', fontsize=9)
         ax.set_ylim(0, data.max()*1.15)
     fig.tight_layout()
     save(fig, str(Path(out_dir)/'fig6_deadline_protocol.pdf'))
@@ -459,16 +463,17 @@ def fig8_ablation(data_dir, out_dir):
 
 
     VARIANT_LABEL = {
-        'GloXRoute_Full':          'Full',
-        'Ablation_NoGlobal':       '− global\ncoord.',
-        'Ablation_NoCapability':   '− capability',
-        'Ablation_NoLoad':         '− load',
-        'Ablation_NoProtocol':     '− protocol',
-        'Ablation_NoReliability':  '− reliability',
+        'GloXRoute_Full':             'Full',
+        'Ablation_NoGlobal':          '− global\ncoord.',
+        'Ablation_NoCapability':      '− capability',
+        'Ablation_NoLoad':            '− load',
+        'Ablation_NoProtocol':        '− protocol',
+        'Ablation_NoReliability':     '− reliability',
+        'Ablation_NoDeadlineBudget':  '− deadline\nbudget',
+        'Ablation_NoCostTerm':        '− cost\nterm',
     }
 
-
-    ORDER = list(VARIANT_LABEL.keys())
+    ORDER = [v for v in VARIANT_LABEL if v in set(abl['method'])]
 
 
     means = (
@@ -714,6 +719,14 @@ def print_tables(all_df, data_dir, out_file):
     p(f"\n  Holm max-p: {t8['p_holm'].max():.2e}")
     p(f"  |d| range:  {t8['d'].abs().min():.2f} – {t8['d'].abs().max():.2f}")
 
+    # ── Table 8b: GloXRoute vs DRL-OR-S ──────────────────────────────
+    p(); p("="*70); p("TABLE 8b: GloXRoute vs DRL-OR-S"); p("="*70)
+    t8b_comp = wilcoxon_holm(all_df,'routing_score','GloXRoute','DRL-OR-S',alt='greater')
+    t8b_dead = wilcoxon_holm(all_df,'deadline_miss_rate','GloXRoute','DRL-OR-S',alt='less')
+    p(f"  {'Config':15s}  {'G composite':12s}  {'D composite':12s}  {'p_holm':10s}  {'G deadline':12s}  {'D deadline':12s}  {'p_holm':10s}")
+    for (_,rc), (_,rd) in zip(t8b_comp.iterrows(), t8b_dead.iterrows()):
+        p(f"  {rc.topo}/{rc.cond:10s}  {rc.G:.4f}        {rc.S:.4f}        {rc.p_holm:.2e}    {rd.G:.4f}        {rd.S:.4f}        {rd.p_holm:.2e}")
+
     # ── Table 6: BA/congestion full ───────────────────────────────────
     p(); p("="*70); p("TABLE 6: BA/CONGESTION — FULL METRICS (mean ± SD, 20 seeds)"); p("="*70)
     COLS = ['success_rate','avg_latency','avg_effective_latency','avg_hops',
@@ -745,10 +758,12 @@ def print_tables(all_df, data_dir, out_file):
         p(); p("="*70); p("TABLE 11: ABLATION (BA topology, 20 seeds)"); p("="*70)
         abl = pd.read_csv(abl_path)
         VARIANT_ORDER = ['GloXRoute_Full','Ablation_NoGlobal','Ablation_NoCapability',
-                         'Ablation_NoLoad','Ablation_NoProtocol','Ablation_NoReliability']
+                         'Ablation_NoLoad','Ablation_NoProtocol','Ablation_NoReliability',
+                         'Ablation_NoDeadlineBudget','Ablation_NoCostTerm']
         LABEL = {'GloXRoute_Full':'GloXRoute (full)','Ablation_NoGlobal':'− global coordinator',
                  'Ablation_NoCapability':'− capability','Ablation_NoLoad':'− load',
-                 'Ablation_NoProtocol':'− protocol','Ablation_NoReliability':'− reliability'}
+                 'Ablation_NoProtocol':'− protocol','Ablation_NoReliability':'− reliability',
+                 'Ablation_NoDeadlineBudget':'− deadline budget','Ablation_NoCostTerm':'− cost term'}
         COLS2 = ['success_rate','avg_effective_latency','protocol_mismatch_rate','routing_score']
         mn2 = abl.groupby('method')[COLS2].mean().round(4)
         full_score = mn2.loc['GloXRoute_Full','routing_score']

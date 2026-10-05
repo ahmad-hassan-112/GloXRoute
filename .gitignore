@@ -3,7 +3,7 @@ venv/
 __pycache__/
 outputs/
 analysis/
-paper_data/
+paper_data*/
 
 show_structure.sh
-figs/
+figs*/
